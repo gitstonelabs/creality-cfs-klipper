@@ -1,0 +1,15 @@
+[run]
+source = src/creality_cfs
+omit =
+    tests/*
+    tools/*
+
+[report]
+fail_under = 80
+show_missing = true
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    def load_config\(
+    \.register_event_handler\(
