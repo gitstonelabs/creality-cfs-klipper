@@ -1,0 +1,66 @@
+# =============================================================================
+# Creality Filament System (CFS) — printer.cfg configuration example
+# =============================================================================
+#
+# Protocol: CFS RS485 v1 (single version)
+# Baud rate: 230400 validated by captured traffic
+# CRC: CRC-8/SMBUS (poly=0x07, init=0x00) validated (16/16 vectors)
+#
+# REQUIRED: Copy creality_cfs.py to ~/klipper/klippy/extras/creality_cfs.py
+#           Then restart Klipper and verify module loads in klippy.log.
+#
+# After configuration, test with:
+#   CFS_INIT           -> run auto-addressing (discover all boxes)
+#   CFS_VERSION        -> print firmware version from each box
+#   CFS_STATUS         -> print operating state of each box
+# =============================================================================
+
+[creality_cfs]
+
+serial_port: /dev/ttyS5
+#   RS485 serial port connected to the CFS hub.
+#   validated default: /dev/ttyS5
+#   Common alternatives: /dev/ttyUSB0, /dev/ttyAMA0
+#   On Creality K2 Plus boards the port is typically /dev/ttyS5.
+
+baud: 230400
+#   Serial baud rate in bits per second.
+#   Default: 230400 — validated by captured traffic.
+#   Do not change unless you have hardware evidence of a different rate.
+
+timeout: 0.1
+#   Default command timeout in seconds for operational commands (GET_BOX_STATE,
+#   GET_VERSION_SN, SET_BOX_MODE, SET_PRE_LOADING).
+#   Note: The auto-addressing discovery step (CMD_GET_SLAVE_INFO) always uses
+#   a 1.0 second timeout regardless of this setting, as boxes may respond slowly.
+#   Default: 0.1
+
+retry_count: 3
+#   Number of retry attempts for failed commands before giving up.
+#   Each retry re-sends the full message and waits for a fresh response.
+#   Addressing commands (auto-init) use 1 retry regardless of this setting.
+#   Default: 3
+
+box_count: 4
+#   Number of CFS boxes expected to be present (1-4).
+#   The auto-addressing sequence will attempt to discover this many boxes.
+#   If fewer boxes are physically connected, the module will log a warning
+#   but continue normally with the boxes that did respond.
+#   Default: 4
+
+auto_init: True
+#   If True, automatically run the auto-addressing sequence when Klipper
+#   transitions to the ready state. Set to False if you want to run
+#   CFS_INIT manually (e.g., after a tool-change or power cycle of the CFS).
+#   Default: True
+
+
+# =============================================================================
+# OPTIONAL: Include CFS macros
+# =============================================================================
+# Add this line anywhere in your printer.cfg to load the CFS macros:
+#
+#   [include cfs_macros.cfg]
+#
+# Ensure cfs_macros.cfg is in the same directory as printer.cfg, or provide
+# an absolute path.

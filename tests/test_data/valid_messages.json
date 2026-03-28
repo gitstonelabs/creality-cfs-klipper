@@ -1,0 +1,122 @@
+[
+  {
+    "hex": "f70103ff0a5c",
+    "description": "CMD_GET_BOX_STATE request to box 1",
+    "command": "0x0A",
+    "addr": 1,
+    "status": "0xFF",
+    "func": "0x0A",
+    "data_hex": "",
+    "length_field": 3
+  },
+  {
+    "hex": "f70203ff0a5c",
+    "description": "CMD_GET_BOX_STATE request to box 2",
+    "command": "0x0A",
+    "addr": 2,
+    "status": "0xFF",
+    "func": "0x0A",
+    "data_hex": "",
+    "length_field": 3
+  },
+  {
+    "hex": "f70103ff1406",
+    "description": "CMD_GET_VERSION_SN request to box 1",
+    "command": "0x14",
+    "addr": 1,
+    "status": "0xFF",
+    "func": "0x14",
+    "data_hex": "",
+    "length_field": 3
+  },
+  {
+    "hex": "f70105ff04000190",
+    "description": "CMD_SET_BOX_MODE box 1, mode=0x00 param=0x01",
+    "command": "0x04",
+    "addr": 1,
+    "status": "0xFF",
+    "func": "0x04",
+    "data_hex": "0001",
+    "length_field": 5
+  },
+  {
+    "hex": "f70105ff0d0f0169",
+    "description": "CMD_SET_PRE_LOADING box 1, mask=0x0F enable=0x01",
+    "command": "0x0D",
+    "addr": 1,
+    "status": "0xFF",
+    "func": "0x0D",
+    "data_hex": "0f01",
+    "length_field": 5
+  },
+  {
+    "hex": "f7fe0500a1fefef8",
+    "description": "CMD_GET_SLAVE_INFO broadcast to 0xFE",
+    "command": "0xA1",
+    "addr": 254,
+    "status": "0x00",
+    "func": "0xA1",
+    "data_hex": "fefe",
+    "length_field": 5
+  },
+  {
+    "hex": "f70103 00a2da",
+    "description": "CMD_ONLINE_CHECK to box 1",
+    "command": "0xA2",
+    "addr": 1,
+    "status": "0x00",
+    "func": "0xA2",
+    "data_hex": "",
+    "length_field": 3
+  },
+  {
+    "hex": "f7010300a3dd",
+    "description": "CMD_GET_ADDR_TABLE to box 1",
+    "command": "0xA3",
+    "addr": 1,
+    "status": "0x00",
+    "func": "0xA3",
+    "data_hex": "",
+    "length_field": 3
+  },
+  {
+    "hex": "f70107000a1c14000048",
+    "description": "CMD_GET_BOX_STATE response from box 1 (RX)",
+    "command": "0x0A",
+    "addr": 1,
+    "status": "0x00",
+    "func": "0x0A",
+    "data_hex": "1c140000",
+    "length_field": 7
+  },
+  {
+    "hex": "f701030004a1",
+    "description": "CMD_SET_BOX_MODE ACK from box 1 (RX)",
+    "command": "0x04",
+    "addr": 1,
+    "status": "0x00",
+    "func": "0x04",
+    "data_hex": "",
+    "length_field": 3
+  },
+  {
+    "hex": "f70103000d9e",
+    "description": "CMD_SET_PRE_LOADING ACK from box 1 (RX)",
+    "command": "0x0D",
+    "addr": 1,
+    "status": "0x00",
+    "func": "0x0D",
+    "data_hex": "",
+    "length_field": 3
+  },
+  {
+    "hex": "f701190014313130313030303038343332313542363235414853 4384",
+    "description": "CMD_GET_VERSION_SN response from box 1, version '11010000843215B625AHSC' (RX)",
+    "command": "0x14",
+    "addr": 1,
+    "status": "0x00",
+    "func": "0x14",
+    "data_hex": "3131303130303030383433323135423632354148534 3",
+    "length_field": 25
+  }
+]

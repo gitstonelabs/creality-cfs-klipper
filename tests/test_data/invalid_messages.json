@@ -1,0 +1,56 @@
+[
+  {
+    "hex": "AA01030 0a3dd",
+    "error": "bad_header",
+    "description": "Wrong header byte (0xAA instead of 0xF7)",
+    "expected_result": "None"
+  },
+  {
+    "hex": "000000 000000",
+    "error": "bad_header",
+    "description": "All-zero frame — wrong header",
+    "expected_result": "None"
+  },
+  {
+    "hex": "f701",
+    "error": "truncated",
+    "description": "Only 2 bytes — below MIN_MSG_LEN=6",
+    "expected_result": "None"
+  },
+  {
+    "hex": "f70103",
+    "error": "truncated",
+    "description": "Only 3 bytes — below MIN_MSG_LEN=6",
+    "expected_result": "None"
+  },
+  {
+    "hex": "f7010300",
+    "error": "truncated",
+    "description": "4 bytes — still too short",
+    "expected_result": "None"
+  },
+  {
+    "hex": "f701030 0a322",
+    "error": "bad_crc",
+    "description": "Valid frame structure but CRC byte 0x22 is wrong (correct is 0xDA for CMD_ONLINE_CHECK)",
+    "expected_result": "crc_valid=False"
+  },
+  {
+    "hex": "f70103ff0aFF",
+    "error": "bad_crc",
+    "description": "CMD_GET_BOX_STATE with corrupted CRC (0xFF instead of 0x5C)",
+    "expected_result": "crc_valid=False"
+  },
+  {
+    "hex": "f70108ff0a000000",
+    "error": "truncated_payload",
+    "description": "LENGTH=8 claims 5 data bytes but frame ends after 2 — truncated",
+    "expected_result": "None"
+  },
+  {
+    "hex": "AABBCCDDEE",
+    "error": "garbage",
+    "description": "Completely random bytes with wrong header",
+    "expected_result": "None"
+  }
+]

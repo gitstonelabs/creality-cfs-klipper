@@ -1,0 +1,117 @@
+[
+  {
+    "description": "CMD_GET_ADDR_TABLE to slave-1 (TX)",
+    "direction": "tx",
+    "full_frame_hex": "f701030 0a3dd",
+    "crc_scope_hex": "0300a3",
+    "expected_crc": "0xDD",
+    "notes": "captured with interceptty; scope = msg[2:-1]"
+  },
+  {
+    "description": "CMD_GET_ADDR_TABLE to slave-2 (TX)",
+    "direction": "tx",
+    "full_frame_hex": "f70203 00a3dd",
+    "crc_scope_hex": "0300a3",
+    "expected_crc": "0xDD",
+    "notes": "same scope as slave-1, same CRC"
+  },
+  {
+    "description": "CMD_GET_ADDR_TABLE to slave-3 (TX)",
+    "direction": "tx",
+    "full_frame_hex": "f703030 0a3dd",
+    "crc_scope_hex": "0300a3",
+    "expected_crc": "0xDD"
+  },
+  {
+    "description": "CMD_GET_ADDR_TABLE to slave-4 (TX)",
+    "direction": "tx",
+    "full_frame_hex": "f704030 0a3dd",
+    "crc_scope_hex": "0300a3",
+    "expected_crc": "0xDD"
+  },
+  {
+    "description": "CMD_SET_BOX_MODE slave-1 mode=0x00 param=0x01 (TX)",
+    "direction": "tx",
+    "full_frame_hex": "f70105ff04000190",
+    "crc_scope_hex": "05ff040001",
+    "expected_crc": "0x90"
+  },
+  {
+    "description": "CMD_GET_VERSION_SN slave-1 (TX)",
+    "direction": "tx",
+    "full_frame_hex": "f70103ff1406",
+    "crc_scope_hex": "03ff14",
+    "expected_crc": "0x06"
+  },
+  {
+    "description": "CMD_SET_PRE_LOADING slave-1 mask=0x0F enable=0x01 (TX)",
+    "direction": "tx",
+    "full_frame_hex": "f70105ff0d0f0169",
+    "crc_scope_hex": "05ff0d0f01",
+    "expected_crc": "0x69"
+  },
+  {
+    "description": "CMD_GET_BOX_STATE slave-1 (TX)",
+    "direction": "tx",
+    "full_frame_hex": "f70103ff0a5c",
+    "crc_scope_hex": "03ff0a",
+    "expected_crc": "0x5C"
+  },
+  {
+    "description": "CMD_GET_SLAVE_INFO broadcast (TX)",
+    "direction": "tx",
+    "full_frame_hex": "f7fe0500a1fefef8",
+    "crc_scope_hex": "0500a1fefe",
+    "expected_crc": "0xF8"
+  },
+  {
+    "description": "CMD_ONLINE_CHECK slave-1 (TX)",
+    "direction": "tx",
+    "full_frame_hex": "f70103 00a2da",
+    "crc_scope_hex": "0300a2",
+    "expected_crc": "0xDA"
+  },
+  {
+    "description": "CMD_GET_ADDR_TABLE response (RX)",
+    "direction": "rx",
+    "full_frame_hex": "f701110 0a30100 5c5130031491b0154c3039 3348",
+    "crc_scope_hex": "1100a30100 5c5130031491b0154c303933",
+    "expected_crc": "0x48"
+  },
+  {
+    "description": "CMD_GET_BOX_STATE response (RX)",
+    "direction": "rx",
+    "full_frame_hex": "f70107000a1c14000048",
+    "crc_scope_hex": "07000a1c140000",
+    "expected_crc": "0x48"
+  },
+  {
+    "description": "CMD_SET_BOX_MODE ACK (RX)",
+    "direction": "rx",
+    "full_frame_hex": "f701030004a1",
+    "crc_scope_hex": "030004",
+    "expected_crc": "0xA1"
+  },
+  {
+    "description": "CMD_SET_PRE_LOADING ACK (RX)",
+    "direction": "rx",
+    "full_frame_hex": "f70103000d9e",
+    "crc_scope_hex": "03000d",
+    "expected_crc": "0x9E"
+  },
+  {
+    "description": "CMD_ONLINE_CHECK response (RX)",
+    "direction": "rx",
+    "full_frame_hex": "f701110 0a20100 5c5130031491b0154c3039 33fd",
+    "crc_scope_hex": "1100a20100 5c5130031491b0154c303933",
+    "expected_crc": "0xFD"
+  },
+  {
+    "description": "CMD_GET_VERSION_SN response (RX)",
+    "direction": "rx",
+    "full_frame_hex": "f701190014313130313030303038343332313542363235414853 4384",
+    "crc_scope_hex": "190014313130313030303038343332313542363235414853 43",
+    "expected_crc": "0x84",
+    "notes": "22 ASCII bytes: '11010000843215B625AHSC'"
+  }
+]

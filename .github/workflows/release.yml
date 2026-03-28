@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run full test suite
+        run: |
+          pytest --cov=src/creality_cfs \
+                 --cov-fail-under=80 \
+                 tests/ -v
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create release archive
+        run: |
+          mkdir -p release/creality-cfs-klipper-${{ steps.version.outputs.VERSION }}
+          cp src/creality_cfs.py release/creality-cfs-klipper-${{ steps.version.outputs.VERSION }}/
+          cp configs/printer.cfg.example release/creality-cfs-klipper-${{ steps.version.outputs.VERSION }}/
+          cp configs/cfs_macros.cfg release/creality-cfs-klipper-${{ steps.version.outputs.VERSION }}/
+          cp docs/installation.md release/creality-cfs-klipper-${{ steps.version.outputs.VERSION }}/INSTALL.md
+          cd release && tar -czf creality-cfs-klipper-${{ steps.version.outputs.VERSION }}.tar.gz \
+            creality-cfs-klipper-${{ steps.version.outputs.VERSION }}/
+
+      - name: Extract changelog entry
+        id: changelog
+        run: |
+          python - << 'PYEOF'
+          import re, os
+          with open("CHANGELOG.md") as f:
+              text = f.read()
+          # Extract the first versioned section
+          match = re.search(r'## \[v[\d.]+.*?\n(.*?)(?=\n## |\Z)', text, re.DOTALL)
+          notes = match.group(1).strip() if match else "See CHANGELOG.md for details."
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"NOTES<<EOF\n{notes}\nEOF\n")
+          PYEOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: CFS Klipper Integration ${{ steps.version.outputs.VERSION }}
+          body: ${{ steps.changelog.outputs.NOTES }}
+          files: release/creality-cfs-klipper-${{ steps.version.outputs.VERSION }}.tar.gz
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, 'alpha') || contains(steps.version.outputs.VERSION, 'beta') || contains(steps.version.outputs.VERSION, 'rc') }}
