@@ -1,5 +1,5 @@
 [run]
-source = src/creality_cfs
+source = creality_cfs
 omit =
     tests/*
     tools/*

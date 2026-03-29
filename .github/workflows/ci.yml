@@ -32,7 +32,7 @@ jobs:
         env:
           PYTHONPATH: src
         run: |
-          pytest --cov=src/creality_cfs \
+          pytest --cov=creality_cfs \
                  --cov-report=term-missing \
                  --cov-report=xml:coverage.xml \
                  --cov-fail-under=80 \

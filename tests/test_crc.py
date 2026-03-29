@@ -277,6 +277,7 @@ def test_crc8_single_bit_flip_changes_result(base_data, flip_byte_index, flip_bi
 # Section F: Performance benchmark
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_crc8_performance_10000_calls_under_one_second():
     """10,000 CRC calculations on a 100-byte payload complete in under 1 second.
 
