@@ -1,10 +1,5 @@
-<<<<<<< HEAD
 # Creality Filament System (CFS) - Klipper Integration
 
-https://img.shields.io/badge/status-alpha-yellow
-https://img.shields.io/badge/license-GPL--3.0-blue
-https://img.shields.io/badge/python-3.7%2B-blue
-https://img.shields.io/badge/klipper-0.11.0%2B-green
 
 Open-source Klipper integration for the Creality Filament System (CFS) multi-material unit.
 
@@ -154,7 +149,7 @@ See CONTRIBUTING.md for guidelines.
 *   🐛 Bug Reports: <https://github.com/gitstonelabs/creality-cfs-klipper/issues>
 *   💬 Questions: <https://github.com/gitstonelabs/creality-cfs-klipper/discussions>
 *   📖 Documentation: See the docs/ directory
-=======
+
 # Creality Filament System (CFS) - Klipper Integration
 
 
@@ -311,4 +306,3 @@ https://img.shields.io/badge/status-alpha-yellow
 https://img.shields.io/badge/license-GPL--3.0-blue
 https://img.shields.io/badge/python-3.7%2B-blue
 https://img.shields.io/badge/klipper-0.11.0%2B-green
->>>>>>> dc6fe7b937f83db2f8f44d1895ce69405f9c894c
