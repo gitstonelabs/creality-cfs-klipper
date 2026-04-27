@@ -308,41 +308,6 @@ From `strings` analysis of `box_wrapper.cpython-39.so`:
 | key862 | right RFID card error | addr |
 | key864 | extrude error: buffer full limit not triggered | — |
 
----
-
-## Physical Filament Path
-
-```
-CFS Box (slots 1–4)
-  │
-  ├─[filament reel / spool]
-  │
-  ▼
-[connections / coupling joint]  ← key835: blockage
-  │
-  ▼
-[box-side filament sensor]      ← key836: blockage between joint and sensor
-  │
-  ▼
-[box extrusion gear]            ← key837: blockage at gear
-  │                             ← key838: gear turned but filament didn't advance
-  ▼
-[in-line buffer]                ← key864: buffer not filled after extrude
-  │
-  ▼
-[Bowden tube → printer]
-  │
-  ▼
-[filament cutter]               ← key841: cut sensor not triggered
-  │                             ← key854: filament present when shouldn't be
-  ▼
-[extruder / Nebula]
-  │
-  ▼
-[hotend]
-```
-
----
 
 ## Protocol Consistency
 
