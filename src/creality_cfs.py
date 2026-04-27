@@ -4,7 +4,7 @@ creality_cfs.py — Klipper Extra Module for Creality Filament System (CFS)
 Protocol version: CFS RS485 v1 (single version)
 Klipper compatibility: v0.11.0+
 License: GPL-3.0 (matching Klipper project)
-Author: Roger Wirkus
+Author: gitstonelabs
 
 Protocol reverse-engineered
 CRC algorithm validated against 16 test vectors
