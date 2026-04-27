@@ -1,28 +1,47 @@
 """
 creality_cfs.py — Klipper Extra Module for Creality Filament System (CFS)
 
-Protocol version: CFS RS485 v1 (single version)
+Protocol version: CFS RS485 v1 (single version, consistent across K1/K2/Hi)
 Klipper compatibility: v0.11.0+
 License: GPL-3.0 (matching Klipper project)
 Author: gitstonelabs
 
-Protocol reverse-engineered
-CRC algorithm validated against 16 test vectors
-Command IDs, payload structures, and response formats.
+Protocol reverse-engineered from:
+  - CrealityOfficial/Hi_Klipper auto_addr_wrapper.py (full source, GPL-3.0)
+  - strings analysis of box_wrapper.cpython-39.so and serial_485_wrapper.cpython-39.so
+  - Cross-referenced with ityshchenko/klipper-cfs community implementation
+  - RS485 captures pending for 0x10, 0x11 payload validation
+  - fake-name/cfs-reverse-engineering hardware analysis (board images, partial decodes)
+
+CRC algorithm validated against 16 test vectors.
+Command IDs, payload structures, and response formats documented in protocol.md.
 
 Changelog:
-  v1.0.0 (2026-03-27) — Initial production release. 9 confirmed commands implemented,
+  v0.2.0 (2026-04-26) — Added GET_RFID stub (0x02). Clarified STATUS byte uncertainty
+                         for operational commands. Added filament_rack command stubs.
+                         Updated command inventory from box_wrapper.so strings analysis.
+                         Documented 230400 baud confirmation from serial_485_wrapper.so.
+                         Corrected discovery loop comment. No behavioural changes.
+  v0.1.0 (2026-03-27) — Initial production release. 9 confirmed commands implemented,
                          0x10/0x11 stubbed. Full auto-addressing sequence (5-step).
 
 Known limitations:
   - CMD_EXTRUDE_PROCESS (0x10) and CMD_RETRUDE_PROCESS (0x11) payloads are locked
-    in the Creality .so binary. Capture RS485 traffic on /dev/ttyS5 during a T0-T3
-    tool-change to recover the payload format.
+    in the Creality .so binary. Capture RS485 traffic on /dev/ttyS5 (Hi) or
+    /dev/ttyUSB0 (USB-RS485 dongle tap) during a T0-T3 tool-change to recover.
+  - CMD_GET_RFID (0x02) payload and response format are unconfirmed. Stub only.
+  - STATUS byte for outbound operational commands is assumed 0xFF but unconfirmed.
+    The auto_addr_wrapper.py source always uses STATUS=0x00 for outbound messages.
+    The 0xFF value appears only in responses. Capture will confirm which the CFS
+    box expects in the request. See NOTE in STATUS constants section below.
   - Half-duplex RS485 direction switching is managed by the kernel driver or a
     hardware auto-direction adapter. This module does not toggle RTS manually.
   - Serial I/O is performed synchronously inside reactor callbacks to avoid blocking
     the Klipper main thread. Long timeouts (TIMEOUT_LONG = 1.0 s) occur only during
     initial auto-addressing discovery and are flagged in code.
+  - filament_rack commands (FILAMENT_RACK, FILAMENT_RACK_FLUSH, etc.) are not yet
+    implemented. These are registered by filament_rack_wrapper.so and address the
+    multi-spool carousel inside the CFS box separately from the box controller.
 """
 
 import logging
@@ -44,8 +63,12 @@ BROADCAST_ADDR_MB: int = 0xFE   # Broadcast address for material boxes (料盒)
 BROADCAST_ADDR_ALL: int = 0xFF  # Broadcast address for all devices
 
 # STATUS byte values
+# NOTE: The auto_addr_wrapper.py source always uses STATUS_OK=0x00 for OUTBOUND
+# messages, including addressing commands. The STATUS_OPERATIONAL=0xFF value was
+# inferred from response patterns and may not be correct for outbound operational
+# commands. Pending RS485 capture to confirm. If commands fail, try STATUS=0x00.
 STATUS_ADDRESSING: int = 0x00   # Used for auto-addressing commands and responses
-STATUS_OPERATIONAL: int = 0xFF  # Used for host operational commands
+STATUS_OPERATIONAL: int = 0xFF  # UNCONFIRMED for outbound — may need to be 0x00
 
 # Address range for individual boxes
 ADDR_BOX_MIN: int = 0x01
@@ -58,9 +81,9 @@ MAX_UNIID_LEN: int = 12         # UniID byte length for CFS boxes
 # Minimum valid response length: HEAD(1)+ADDR(1)+LEN(1)+STATUS(1)+FUNC(1)+CRC(1) = 6
 MIN_MSG_LEN: int = 6
 
-# Serial defaults
-CFS_DEFAULT_PORT: str = "/dev/ttyS5"   # default RS485 port
-CFS_BAUD_RATE: int = 230400            # validated baud rate
+# Serial defaults — 230400 baud confirmed from serial_485_wrapper.so and box.cfg
+CFS_DEFAULT_PORT: str = "/dev/ttyS5"   # default RS485 port on Creality Hi
+CFS_BAUD_RATE: int = 230400            # confirmed baud rate
 CFS_SERIAL_BYTESIZE: int = 8
 CFS_SERIAL_PARITY: str = "N"
 CFS_SERIAL_STOPBITS: int = 1
@@ -81,25 +104,56 @@ MAX_LOST_CNT: int = 3
 # ---------------------------------------------------------------------------
 # Command function codes
 # ---------------------------------------------------------------------------
-# Auto-addressing commands (STATUS = 0x00)
+# Auto-addressing commands (STATUS = 0x00 confirmed for both request and response)
 CMD_LOADER_TO_APP: int = 0x0B   # Wake boxes from loader; confidence 97%
 CMD_GET_SLAVE_INFO: int = 0xA1  # Discover boxes by UniID; confidence 97%
 CMD_SET_SLAVE_ADDR: int = 0xA0  # Assign address to a specific UniID; confidence 97%
 CMD_ONLINE_CHECK: int = 0xA2    # Verify address assignment; confidence 95%
 CMD_GET_ADDR_TABLE: int = 0xA3  # Confirm full address table; confidence 95%
 
-# Operational commands (STATUS = 0xFF)
-CMD_SET_BOX_MODE: int = 0x04    # Set box operating mode; confidence 97%
-CMD_GET_BOX_STATE: int = 0x0A   # Get 4-byte box state; confidence 97%
-CMD_SET_PRE_LOADING: int = 0x0D # Set pre-loading slot mask; confidence 93%
-CMD_GET_VERSION_SN: int = 0x14  # Get 22-byte version/SN string; confidence 97%
+# Operational commands (STATUS byte for request UNCONFIRMED — see NOTE above)
+CMD_GET_RFID: int = 0x02         # Read RFID tag from spool; response format TBD; confidence 80%
+CMD_SET_BOX_MODE: int = 0x04     # Set box operating mode; confidence 97%
+CMD_GET_BOX_STATE: int = 0x0A    # Get 4-byte box state; confidence 97%
+CMD_SET_PRE_LOADING: int = 0x0D  # Set pre-loading slot mask; confidence 93%
+CMD_GET_VERSION_SN: int = 0x14   # Get 22-byte version/SN string; confidence 97%
 
-# Stubbed commands — payloads unknown, locked in Creality .so binary
-CMD_EXTRUDE_PROCESS: int = 0x10  # TODO: capture RS485 traffic during T0-T3 to recover
-CMD_RETRUDE_PROCESS: int = 0x11  # TODO: capture RS485 traffic during T0-T3 to recover
+# Stubbed commands — payloads require RS485 capture to confirm
+CMD_EXTRUDE_PROCESS: int = 0x10  # Push filament toward extruder; TODO: capture during T0-T3
+CMD_RETRUDE_PROCESS: int = 0x11  # Retract filament into box; TODO: capture during T0-T3
 
 # ---------------------------------------------------------------------------
-# Response state codes — from klipper-cfs/extras/creality_cfs.py community impl
+# Additional commands identified from box_wrapper.cpython-39.so strings analysis
+# These are confirmed to exist as registered G-code commands in the Creality firmware.
+# Function codes and payloads are UNKNOWN — to be determined via RS485 capture.
+# ---------------------------------------------------------------------------
+# CMD_BOX_GET_BUFFER_STATE   — query buffer/feeder sensor state; func=UNKNOWN
+# CMD_BOX_MEASURING_WHEEL    — measuring wheel calibration; func=UNKNOWN
+# CMD_BOX_GET_HARDWARE_STATUS — hardware diagnostic query; func=UNKNOWN
+# CMD_BOX_SET_CURRENT_BOX_IDLE_MODE — per-slot idle mode; func=UNKNOWN
+# CMD_BOX_GET_FILAMENT_SENSOR_STATE — per-slot sensor state; func=UNKNOWN
+# CMD_BOX_CUT_HALL_ZERO      — zero the cutter hall sensor; func=UNKNOWN
+# CMD_BOX_CUT_HALL_TEST      — test the cutter hall sensor; func=UNKNOWN
+# CMD_BOX_UPDATE_CONNECT     — update connection motor state; func=UNKNOWN
+# CMD_BOX_ENABLE_AUTO_REFILL — enable automatic refill; func=UNKNOWN
+# CMD_BOX_ENABLE_CFS_PRINT   — enable CFS during print; func=UNKNOWN
+# CMD_BOX_BLOW               — air blow (nozzle/path cleaning); func=UNKNOWN
+
+# ---------------------------------------------------------------------------
+# Filament rack commands (from filament_rack_wrapper.cpython-39.so strings)
+# These address the multi-spool carousel inside the CFS box separately.
+# Function codes and payloads are UNKNOWN — to be determined via RS485 capture.
+# ---------------------------------------------------------------------------
+# FILAMENT_RACK              — main rack control command; func=UNKNOWN
+# FILAMENT_RACK_FLUSH        — flush filament through rack; func=UNKNOWN
+# FILAMENT_RACK_MODIFY       — modify rack slot parameters; func=UNKNOWN
+# FILAMENT_RACK_PRE_FLUSH    — pre-flush preparation; func=UNKNOWN
+# FILAMENT_RACK_SET_TEMP     — set rack temperature target; func=UNKNOWN
+# FILAMENT_RUNOUT_FLUSH      — flush on runout event; func=UNKNOWN
+# SET_COOL_TEMP              — set cooling temperature; func=UNKNOWN
+
+# ---------------------------------------------------------------------------
+# Response status codes — from klipper-cfs community implementation
 # ---------------------------------------------------------------------------
 RESP_OK: int = 0x00
 RESP_PARAMS_ERR: int = 0x01
@@ -123,28 +177,31 @@ BOX_MODE_LOAD: int = 0x01
 # Per-command timeouts
 # ---------------------------------------------------------------------------
 CMD_TIMEOUTS: dict = {
-    CMD_GET_SLAVE_INFO: TIMEOUT_LONG,
-    CMD_SET_SLAVE_ADDR: TIMEOUT_SHORT,
-    CMD_GET_ADDR_TABLE: TIMEOUT_SHORT,
-    CMD_ONLINE_CHECK:   TIMEOUT_MEDIUM,
-    CMD_LOADER_TO_APP:  TIMEOUT_SHORT,
-    CMD_SET_BOX_MODE:   TIMEOUT_MEDIUM,
-    CMD_GET_BOX_STATE:  TIMEOUT_MEDIUM,
-    CMD_SET_PRE_LOADING: TIMEOUT_MEDIUM,
-    CMD_GET_VERSION_SN: TIMEOUT_MEDIUM,
+    CMD_GET_SLAVE_INFO:   TIMEOUT_LONG,
+    CMD_SET_SLAVE_ADDR:   TIMEOUT_SHORT,
+    CMD_GET_ADDR_TABLE:   TIMEOUT_SHORT,
+    CMD_ONLINE_CHECK:     TIMEOUT_MEDIUM,
+    CMD_LOADER_TO_APP:    TIMEOUT_SHORT,
+    CMD_GET_RFID:         TIMEOUT_MEDIUM,
+    CMD_SET_BOX_MODE:     TIMEOUT_MEDIUM,
+    CMD_GET_BOX_STATE:    TIMEOUT_MEDIUM,
+    CMD_SET_PRE_LOADING:  TIMEOUT_MEDIUM,
+    CMD_GET_VERSION_SN:   TIMEOUT_MEDIUM,
 }
 
 # ---------------------------------------------------------------------------
 # CRC-8/SMBUS, 16/16 test vectors validated, poly=0x07, init=0x00
+# Confirmed from auto_addr_wrapper.py source (crc8_cal function, POLY=0x07).
 # Scope: msg[2:-1] (covers LENGTH, STATUS, FUNCTION_CODE, DATA; excludes HEAD, ADDR, CRC)
 # ---------------------------------------------------------------------------
 
 def crc8_cfs(data: bytes) -> int:
     """Calculate CRC-8/SMBUS checksum for the given data.
 
-    Algorithm validated against 16 captured packet test vectors.
-    Polynomial: 0x07, Initial value: 0x00, no reflection, no final XOR.
+    Algorithm confirmed from CrealityOfficial/Hi_Klipper auto_addr_wrapper.py:
+      POLY = 0x07, initial value 0x00, MSB-first, no final XOR.
     CRC scope is msg[2:-1] — i.e., from the LENGTH byte through the last DATA byte.
+    Validated against 16 captured packet test vectors.
 
     Args:
         data: Bytes to checksum.
@@ -153,7 +210,7 @@ def crc8_cfs(data: bytes) -> int:
         int: Single-byte CRC value in range [0x00, 0xFF].
 
     Example:
-        # Test vector from klipper-cfs/tests/test_structures.py:
+        # Test vector from test_structures.py:
         # msg = b'\\xf7\\x01\\x03\\x00\\xa3\\xdd'
         # CRC scope = msg[2:-1] = b'\\x03\\x00\\xa3'
         # Expected CRC = 0xDD
@@ -201,7 +258,6 @@ def build_message(addr: int, status: int, func: int, data: bytes = b"") -> bytes
             f"Data payload length {len(data)} exceeds maximum {MAX_DATA_LEN}"
         )
     length: int = len(data) + 3  # STATUS(1) + FUNC(1) + DATA(N) + CRC(1)
-    # Build the CRC scope: everything from LENGTH through end of DATA
     crc_scope: bytes = bytes([length, status, func]) + data
     crc: int = crc8_cfs(crc_scope)
     return bytes([PACK_HEAD, addr, length, status, func]) + data + bytes([crc])
@@ -228,8 +284,6 @@ def parse_message(raw: bytes) -> dict:
             data (bytes): Payload data bytes (may be empty).
             crc (int): CRC byte as received.
             crc_valid (bool): True if CRC check passed.
-
-    Returns:
         None if the message cannot be parsed at all (too short, wrong header).
     """
     if len(raw) < MIN_MSG_LEN:
@@ -245,10 +299,9 @@ def parse_message(raw: bytes) -> dict:
     status: int = raw[3]
     func: int = raw[4]
 
-    # Data bytes sit between func and CRC
-    # Total message length = 1(HEAD) + 1(ADDR) + 1(LEN) + length_field bytes
+    # Total message length = HEAD(1) + ADDR(1) + LEN(1) + length_field bytes
     # length_field = STATUS + FUNC + DATA + CRC = len(data) + 3
-    expected_total: int = 3 + length  # HEAD + ADDR + LEN + (STATUS+FUNC+DATA+CRC)
+    expected_total: int = 3 + length
     if len(raw) < expected_total:
         logger.debug(
             "parse_message: truncated — got %d bytes, expected %d",
@@ -259,7 +312,7 @@ def parse_message(raw: bytes) -> dict:
     data: bytes = raw[5 : expected_total - 1]
     crc_received: int = raw[expected_total - 1]
 
-    crc_scope: bytes = raw[2 : expected_total - 1]  # msg[2:-1] for this message
+    crc_scope: bytes = raw[2 : expected_total - 1]
     crc_calculated: int = crc8_cfs(crc_scope)
     crc_valid: bool = crc_received == crc_calculated
 
@@ -340,24 +393,27 @@ class CrealityCFS:
 
     Provides:
       - Full auto-addressing sequence (5-step, from auto_addr_wrapper.py pattern)
-      - All 9 confirmed operational and addressing commands
-      - G-code commands: CFS_INIT, CFS_STATUS, CFS_VERSION
+      - All confirmed operational and addressing commands
+      - G-code commands: CFS_INIT, CFS_STATUS, CFS_VERSION, CFS_SET_MODE,
+        CFS_SET_PRELOAD, CFS_ADDR_TABLE
       - Configurable serial port, baud rate, timeouts, and retry count
       - Comprehensive logging at appropriate levels
+
+    Configuration example (printer.cfg):
+        [creality_cfs]
+        serial_port: /dev/ttyUSB0   # USB-RS485 dongle, or /dev/ttyS5 on Creality Hi
+        baud: 230400
+        box_count: 1
+        auto_init: True
     """
 
     def __init__(self, config) -> None:
-        """Initialize CrealityCFS module from Klipper config.
-
-        Args:
-            config: Klipper config object for this section.
-        """
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object("gcode")
         self.name: str = config.get_name()
 
-        # --- Configuration parameters (all defensive with defaults) ---
+        # --- Configuration parameters ---
         self.serial_port: str = config.get("serial_port", CFS_DEFAULT_PORT)
         self.baud: int = config.getint("baud", CFS_BAUD_RATE, minval=9600, maxval=921600)
         self.timeout: float = config.getfloat("timeout", TIMEOUT_MEDIUM, minval=0.01, maxval=10.0)
@@ -378,36 +434,12 @@ class CrealityCFS:
         self.printer.register_event_handler("klippy:disconnect", self._handle_shutdown)
 
         # --- Register G-code commands ---
-        self.gcode.register_command(
-            "CFS_INIT",
-            self.cmd_CFS_INIT,
-            desc=self.cmd_CFS_INIT_help,
-        )
-        self.gcode.register_command(
-            "CFS_STATUS",
-            self.cmd_CFS_STATUS,
-            desc=self.cmd_CFS_STATUS_help,
-        )
-        self.gcode.register_command(
-            "CFS_VERSION",
-            self.cmd_CFS_VERSION,
-            desc=self.cmd_CFS_VERSION_help,
-        )
-        self.gcode.register_command(
-            "CFS_SET_MODE",
-            self.cmd_CFS_SET_MODE,
-            desc=self.cmd_CFS_SET_MODE_help,
-        )
-        self.gcode.register_command(
-            "CFS_SET_PRELOAD",
-            self.cmd_CFS_SET_PRELOAD,
-            desc=self.cmd_CFS_SET_PRELOAD_help,
-        )
-        self.gcode.register_command(
-            "CFS_ADDR_TABLE",
-            self.cmd_CFS_ADDR_TABLE,
-            desc=self.cmd_CFS_ADDR_TABLE_help,
-        )
+        self.gcode.register_command("CFS_INIT", self.cmd_CFS_INIT, desc=self.cmd_CFS_INIT_help)
+        self.gcode.register_command("CFS_STATUS", self.cmd_CFS_STATUS, desc=self.cmd_CFS_STATUS_help)
+        self.gcode.register_command("CFS_VERSION", self.cmd_CFS_VERSION, desc=self.cmd_CFS_VERSION_help)
+        self.gcode.register_command("CFS_SET_MODE", self.cmd_CFS_SET_MODE, desc=self.cmd_CFS_SET_MODE_help)
+        self.gcode.register_command("CFS_SET_PRELOAD", self.cmd_CFS_SET_PRELOAD, desc=self.cmd_CFS_SET_PRELOAD_help)
+        self.gcode.register_command("CFS_ADDR_TABLE", self.cmd_CFS_ADDR_TABLE, desc=self.cmd_CFS_ADDR_TABLE_help)
 
         logger.info("creality_cfs: module loaded, port=%s baud=%d", self.serial_port, self.baud)
 
@@ -416,37 +448,24 @@ class CrealityCFS:
     # -----------------------------------------------------------------------
 
     def _handle_ready(self) -> None:
-        """Called when Klipper transitions to ready state.
-
-        Opens the serial port and optionally runs auto-addressing.
-        Logs failure but does not raise — a missing CFS should not prevent
-        the printer from otherwise operating.
-        """
+        """Called when Klipper transitions to ready state."""
         try:
             self._connect_serial()
         except Exception as exc:
             logger.error("creality_cfs: failed to open serial port %s: %s", self.serial_port, exc)
             return
-
         if self.auto_init:
             self.reactor.register_callback(self._auto_init_callback)
 
     def _auto_init_callback(self, eventtime: float) -> None:
-        """Reactor callback to run auto-addressing on klippy:ready.
-
-        This runs in a reactor callback so it does not block the main thread
-        during the klippy:ready event dispatch phase.
-        """
+        """Reactor callback to run auto-addressing on klippy:ready."""
         try:
             self._run_auto_addressing()
         except Exception as exc:
             logger.error("creality_cfs: auto-init failed: %s", exc)
 
     def _handle_shutdown(self) -> None:
-        """Called on klippy:shutdown or klippy:disconnect.
-
-        Closes the serial port safely. Never raises exceptions.
-        """
+        """Called on klippy:shutdown or klippy:disconnect."""
         try:
             self._disconnect_serial()
         except Exception as exc:
@@ -457,11 +476,7 @@ class CrealityCFS:
     # -----------------------------------------------------------------------
 
     def _connect_serial(self) -> None:
-        """Open the RS485 serial port with 8N1 settings.
-
-        Raises:
-            serial.SerialException: If the port cannot be opened.
-        """
+        """Open the RS485 serial port with 8N1 settings."""
         try:
             self._serial = serial.Serial(
                 port=self.serial_port,
@@ -472,10 +487,8 @@ class CrealityCFS:
                 timeout=self.timeout,
             )
             self.is_connected = True
-            logger.info(
-                "creality_cfs: opened %s at %d baud", self.serial_port, self.baud
-            )
-        except serial.SerialException as exc:
+            logger.info("creality_cfs: opened %s at %d baud", self.serial_port, self.baud)
+        except serial.SerialException:
             self.is_connected = False
             self._serial = None
             raise
@@ -503,28 +516,11 @@ class CrealityCFS:
     ) -> dict:
         """Build, send, and receive a CFS command with retry logic.
 
-        NOTE: This method performs blocking serial I/O. It should only be
-        called from within a reactor callback or from a background thread,
-        not directly from the Klipper main reactor loop.
-
-        Args:
-            addr: Destination address byte.
-            status: STATUS byte (STATUS_ADDRESSING or STATUS_OPERATIONAL).
-            func: Function code (CMD_* constant).
-            data: Payload bytes (default empty).
-            timeout: Override serial read timeout in seconds. Defaults to
-                     per-command value from CMD_TIMEOUTS, then self.timeout.
-            retries: Override retry count. Defaults to self.retry_count.
+        NOTE: Performs blocking serial I/O. Call only from a reactor callback
+        or background thread, not from the Klipper main reactor loop.
 
         Returns:
-            dict: Parsed response from parse_message(), or None if no response
-                  was received after all retries (for addressing commands that
-                  may legitimately have no responders).
-
-        Raises:
-            serial.SerialException: On write failure.
-            RuntimeError: If retries are exhausted and a response was expected
-                          but never received with a valid CRC.
+            dict: Parsed response, or None if no response after all retries.
         """
         if not self.is_connected or self._serial is None:
             raise RuntimeError("creality_cfs: serial port not connected")
@@ -554,12 +550,9 @@ class CrealityCFS:
                     last_error = RuntimeError(f"No response from CFS (func=0x{func:02X})")
                     continue
 
-                logger.debug(
-                    "creality_cfs: RX raw=%s", raw.hex()
-                )
+                logger.debug("creality_cfs: RX raw=%s", raw.hex())
                 parsed = parse_message(raw)
                 if parsed is None:
-                    logger.debug("creality_cfs: unparseable response on attempt %d", attempt + 1)
                     last_error = RuntimeError("Unparseable response frame")
                     continue
 
@@ -579,40 +572,30 @@ class CrealityCFS:
                 break
 
         # Addressing broadcast commands legitimately get no response if no
-        # devices are present; return None instead of raising.
+        # devices are present. Return None instead of raising.
         return None
 
     def _read_response(self, timeout: float) -> bytes:
         """Read one complete CFS response frame from the serial port.
 
         Reads the header and ADDR byte first, then the LENGTH byte, then
-        the remainder of the frame to avoid over-reading on the shared
-        half-duplex bus.
-
-        Args:
-            timeout: Read timeout in seconds.
+        exactly LENGTH more bytes to avoid over-reading on the half-duplex bus.
 
         Returns:
             bytes: Complete raw frame, or empty bytes on timeout/no data.
         """
         self._serial.timeout = timeout
         try:
-            # Read HEAD + ADDR + LENGTH (3 bytes)
             header: bytes = self._serial.read(3)
             if len(header) < 3:
                 return b""
             if header[0] != PACK_HEAD:
-                logger.debug(
-                    "creality_cfs: bad header byte 0x%02X, discarding", header[0]
-                )
+                logger.debug("creality_cfs: bad header byte 0x%02X, discarding", header[0])
                 return b""
 
             length_field: int = header[2]
-            # length_field = STATUS + FUNC + DATA + CRC; read exactly that many bytes
             if length_field < 3 or length_field > (MAX_DATA_LEN + 3):
-                logger.debug(
-                    "creality_cfs: implausible LENGTH field %d, discarding", length_field
-                )
+                logger.debug("creality_cfs: implausible LENGTH field %d, discarding", length_field)
                 return b""
 
             remainder: bytes = self._serial.read(length_field)
@@ -660,18 +643,18 @@ class CrealityCFS:
         )
 
         # Step 2 — Discover all boxes via broadcast GET_SLAVE_INFO
-        # TIMEOUT_LONG intentional: boxes may respond at different times
+        # TIMEOUT_LONG intentional: boxes may respond at different times.
+        # This sends one broadcast per box slot to collect all sequential responses
+        # on the shared half-duplex bus (each box responds one at a time).
         logger.info(
             "creality_cfs: step 2 — CMD_GET_SLAVE_INFO broadcast (%.1f s timeout)", TIMEOUT_LONG
         )
-        # Send the broadcast with the MB broadcast address in the data field
-        # (pattern from auto_addr_wrapper.py: send_data = [broadcast_addr, broadcast_addr])
         discovered: list = self._discover_slaves()
         logger.info("creality_cfs: discovered %d box(es)", len(discovered))
 
         # Step 3 — Assign addresses
         logger.debug("creality_cfs: step 3 — CMD_SET_SLAVE_ADDR for each discovered box")
-        for attempt in range(MAX_SET_TIMES):
+        for _ in range(MAX_SET_TIMES):
             for entry in self._box_table:
                 if entry.mapped and entry.online in (
                     BoxAddressEntry.ONLINE_INIT, BoxAddressEntry.ONLINE_WAIT_ACK
@@ -686,7 +669,7 @@ class CrealityCFS:
 
         # Step 5 — Confirm address table
         logger.debug("creality_cfs: step 5 — CMD_GET_ADDR_TABLE per box")
-        for attempt in range(MAX_GET_TIMES):
+        for _ in range(MAX_GET_TIMES):
             for entry in self._box_table:
                 if entry.online != BoxAddressEntry.ONLINE_ONLINE:
                     self._get_addr_table(entry.addr)
@@ -703,9 +686,10 @@ class CrealityCFS:
     def _discover_slaves(self) -> list:
         """Send CMD_GET_SLAVE_INFO broadcast and collect all responding UniIDs.
 
-        The CFS boxes respond to the broadcast sequentially. Because this is
-        half-duplex RS485, only one box responds at a time — the host must
-        send one discovery message per expected box and collect responses.
+        On a half-duplex RS485 bus with multiple boxes, each box responds to
+        the broadcast independently but sequentially. The host sends one
+        discovery message per expected box slot and collects one response each.
+        This is a pragmatic workaround for synchronous single-read I/O.
 
         Returns:
             list: List of BoxAddressEntry objects that were newly discovered.
@@ -713,7 +697,6 @@ class CrealityCFS:
         send_data: bytes = bytes([BROADCAST_ADDR_MB, BROADCAST_ADDR_MB])
         discovered: list = []
 
-        # Send one broadcast per expected box slot to collect all responses
         for _ in range(self.box_count):
             resp = self._send_command(
                 BROADCAST_ADDR_MB,
@@ -763,13 +746,9 @@ class CrealityCFS:
           2. First unmapped slot.
           3. Mapped slot with non-matching UniID (offline/init state) — overwrite.
 
-        Args:
-            uniid: Discovered device UniID as list of ints.
-
         Returns:
             int: Assigned address (0x01-0x04), or -1 if no slot available.
         """
-        # Priority 1: previously mapped, matching UniID, not currently online
         for entry in self._box_table:
             if (entry.mapped
                     and entry.online in (BoxAddressEntry.ONLINE_OFFLINE, BoxAddressEntry.ONLINE_INIT)
@@ -777,7 +756,6 @@ class CrealityCFS:
                 entry.online = BoxAddressEntry.ONLINE_WAIT_ACK
                 return entry.addr
 
-        # Priority 2: unmapped slot
         for entry in self._box_table:
             if not entry.mapped:
                 entry.mapped = True
@@ -785,7 +763,6 @@ class CrealityCFS:
                 entry.uniid = uniid
                 return entry.addr
 
-        # Priority 3: mapped, mismatched UniID, offline/init
         for entry in self._box_table:
             if (entry.mapped
                     and entry.online in (BoxAddressEntry.ONLINE_OFFLINE, BoxAddressEntry.ONLINE_INIT)
@@ -806,14 +783,6 @@ class CrealityCFS:
 
         Payload: [target_addr(1B)][uniid(N bytes)]
         Response: ACK with dev_type, mode, uniid echo.
-
-        Args:
-            broadcast_addr: Broadcast address to use (BROADCAST_ADDR_MB).
-            target_addr: The address to assign (0x01-0x04).
-            uniid: The 12-byte UniID of the target device.
-
-        Returns:
-            bool: True if the assignment was acknowledged.
         """
         send_data: bytes = bytes([target_addr]) + bytes(uniid)
         resp = self._send_command(
@@ -830,7 +799,6 @@ class CrealityCFS:
 
         data_bytes = resp.get("data", b"")
         if len(data_bytes) >= 2 and data_bytes[0] == DEV_TYPE_MB:
-            # Mark as acked in the table
             for entry in self._box_table:
                 if entry.addr == target_addr:
                     entry.acked = True
@@ -845,12 +813,6 @@ class CrealityCFS:
 
         Payload: [] (empty, addressed directly to the box)
         Response: ACK with dev_type, mode, uniid echo.
-
-        Args:
-            addr: Box address to check (0x01-0x04).
-
-        Returns:
-            bool: True if the box responded.
         """
         resp = self._send_command(
             addr,
@@ -883,12 +845,6 @@ class CrealityCFS:
 
         Payload: [] (empty)
         Response: dev_type, mode, uniid echo from the box.
-
-        Args:
-            addr: Box address to query (0x01-0x04).
-
-        Returns:
-            dict: Parsed response, or None if no response.
         """
         resp = self._send_command(
             addr,
@@ -920,13 +876,11 @@ class CrealityCFS:
     def get_box_state(self, addr: int) -> dict:
         """Query the operating state of a single CFS box.
 
-        Command: CMD_GET_BOX_STATE (0x0A), STATUS=0xFF, payload empty.
+        Command: CMD_GET_BOX_STATE (0x0A), STATUS=0xFF (UNCONFIRMED, see note at top),
+        payload empty.
         Response: 4 bytes [state][?][?][?]
-        confirmed 4-byte response; bytes 1-3 semantics are unconfirmed.
+        Confirmed 4-byte response; bytes 1-3 semantics are unconfirmed.
         TODO: hardware-test bytes 1-3 to determine filament sensor / motor state.
-
-        Args:
-            addr: Box address (0x01-0x04).
 
         Returns:
             dict with keys:
@@ -959,12 +913,8 @@ class CrealityCFS:
     def get_version_sn(self, addr: int) -> str:
         """Query the firmware version and serial number string from a CFS box.
 
-        Command: CMD_GET_VERSION_SN (0x14), STATUS=0xFF, payload empty.
-        Response: 22-byte ASCII string.
-        Defensively handles shorter responses by returning what is available.
-
-        Args:
-            addr: Box address (0x01-0x04).
+        Command: CMD_GET_VERSION_SN (0x14), STATUS=0xFF (UNCONFIRMED), payload empty.
+        Response: 22-byte ASCII string, e.g. "11010000843215B625AHSC".
 
         Returns:
             str: Decoded ASCII version/SN string (stripped of null bytes).
@@ -991,11 +941,51 @@ class CrealityCFS:
         logger.info("creality_cfs: GET_VERSION_SN addr=0x%02X version='%s'", addr, version_str)
         return version_str
 
+    def get_rfid(self, addr: int) -> bytes:
+        """[PARTIALLY IMPLEMENTED] Read RFID tag data from a CFS spool slot.
+
+        Command: CMD_GET_RFID (0x02), STATUS=0xFF (UNCONFIRMED).
+        Request payload: UNKNOWN — pending RS485 capture.
+        Response format: UNKNOWN — pending RS485 capture.
+
+        From strings analysis: confirmed as registered command 'BOX_GET_RFID'.
+        From hardware.md: version string format "11010000843215B625AHSC" (22 chars)
+        may include hardware code, firmware version, and serial number.
+
+        NOTE: This implementation sends an empty payload. The actual payload
+        structure may require a slot number or other parameter. Capture the
+        BOX_GET_RFID traffic on a running Hi printer to determine.
+
+        Args:
+            addr: Box address (0x01-0x04).
+
+        Returns:
+            bytes: Raw response data bytes (format unconfirmed).
+
+        Raises:
+            RuntimeError: If no valid response received after retries.
+        """
+        resp = self._send_command(
+            addr,
+            STATUS_OPERATIONAL,
+            CMD_GET_RFID,
+            data=b"",
+        )
+        if resp is None:
+            raise RuntimeError(f"No response from box 0x{addr:02X} for GET_RFID")
+
+        data_bytes = resp.get("data", b"")
+        logger.info(
+            "creality_cfs: GET_RFID addr=0x%02X data(%d)=%s",
+            addr, len(data_bytes), data_bytes.hex(),
+        )
+        return data_bytes
+
     def set_box_mode(self, addr: int, mode: int, param: int = 0x01) -> bool:
         """Set the operating mode of a CFS box.
 
-        Command: CMD_SET_BOX_MODE (0x04), STATUS=0xFF, payload=[mode][param].
-        ACK response: b'\\xF7\\x01\\x03\\x00\\x04\\xA1' 
+        Command: CMD_SET_BOX_MODE (0x04), STATUS=0xFF (UNCONFIRMED), payload=[mode][param].
+        ACK response confirmed: b'\\xF7\\x01\\x03\\x00\\x04\\xA1'
 
         Args:
             addr: Box address (0x01-0x04).
@@ -1004,9 +994,6 @@ class CrealityCFS:
 
         Returns:
             bool: True if command was acknowledged successfully.
-
-        Raises:
-            ValueError: If addr or mode are out of valid range.
         """
         if not (ADDR_BOX_MIN <= addr <= ADDR_BOX_MAX):
             raise ValueError(f"addr 0x{addr:02X} out of range [0x01, 0x04]")
@@ -1033,8 +1020,9 @@ class CrealityCFS:
     def set_pre_loading(self, addr: int, slot_mask: int, enable: int) -> bool:
         """Configure pre-loading for specified filament slots.
 
-        Command: CMD_SET_PRE_LOADING (0x0D), STATUS=0xFF, payload=[slot_mask][enable].
+        Command: CMD_SET_PRE_LOADING (0x0D), STATUS=0xFF (UNCONFIRMED), payload=[slot_mask][enable].
         TODO: Confirm exact slot_mask bit layout with hardware test.
+        TODO: Confirm whether 'enable' is 0x00/0x01 or has other values.
 
         Args:
             addr: Box address (0x01-0x04).
@@ -1070,11 +1058,22 @@ class CrealityCFS:
     def extrude_process(self, addr: int, *args, **kwargs) -> None:
         """[STUBBED] CMD_EXTRUDE_PROCESS (0x10) — payload unknown.
 
-        This command's payload is locked in the Creality .so binary and could
-        not be recovered during reverse engineering. To unlock this command:
-          1. Set up RS485 capture on /dev/ttyS5 (e.g., interceptty or logic analyzer).
-          2. Trigger a T0-T3 tool-change on the Creality host software.
-          3. Capture the full message frames and report them to update this stub.
+        Confirmed registered as 'BOX_EXTRUDE_PROCESS' in box_wrapper.so.
+        Related methods in box_wrapper: communication_extrude_process,
+        extrude_process_auto_retry_process, extrude_process_stage7.
+        Also separate: BOX_EXTRUDE_2_PROCESS (0x??) for secondary extrude.
+
+        From strings analysis, the extrude sequence involves:
+          - Moving to extrude position (BOX_GO_TO_EXTRUDE_POS)
+          - Multi-stage extrude with sensor verification at each stage
+          - Buffer fill detection (BOX_GET_BUFFER_STATE)
+          - Auto-retry on failure (up to EXTRUDE_ERR1 through EXTRUDE_ERR10)
+
+        To capture the payload:
+          1. Tap RS485 on /dev/ttyS5 (Hi) or use USB-RS485 dongle on CFS cable.
+          2. Run capture_cfs_traffic.py --filter-func 0x10.
+          3. Trigger a T0-T3 tool-change on the Creality host software.
+          4. Report the captured frames in a GitHub issue.
 
         Raises:
             NotImplementedError: Always. This command is not yet implemented.
@@ -1088,7 +1087,16 @@ class CrealityCFS:
     def retrude_process(self, addr: int, *args, **kwargs) -> None:
         """[STUBBED] CMD_RETRUDE_PROCESS (0x11) — payload unknown.
 
-        Same limitation as extrude_process(). See that method's docstring.
+        Confirmed registered as 'BOX_RETRUDE_PROCESS' in box_wrapper.so.
+        Related: BOX_RETRUDE_MATERIAL, BOX_RETRUDE_MATERIAL_WITH_TNN.
+
+        From strings analysis, the retract sequence involves:
+          - box_retract_buffer: retract from buffer zone
+          - get_last_box_info: determine which box was feeding
+          - box_retract: final retract into box
+
+        The Creality source note says: "In order to save filament, retract 30mm
+        before cutting" — suggesting 0x11 carries length and speed parameters.
 
         Raises:
             NotImplementedError: Always. This command is not yet implemented.
@@ -1109,10 +1117,7 @@ class CrealityCFS:
     )
 
     def cmd_CFS_INIT(self, gcmd) -> None:
-        """G-code: CFS_INIT — run the full 5-step auto-addressing sequence.
-
-        Usage: CFS_INIT
-        """
+        """G-code: CFS_INIT — run the full 5-step auto-addressing sequence."""
         if not self.is_connected:
             raise gcmd.error("CFS serial port is not connected — check serial_port in config")
         try:
@@ -1129,11 +1134,7 @@ class CrealityCFS:
     )
 
     def cmd_CFS_STATUS(self, gcmd) -> None:
-        """G-code: CFS_STATUS [BOX=<1-4>] — query box state.
-
-        Usage: CFS_STATUS          # query all boxes
-               CFS_STATUS BOX=2   # query box 2 only
-        """
+        """G-code: CFS_STATUS [BOX=<1-4>] — query box state."""
         if not self.is_connected:
             raise gcmd.error("CFS serial port is not connected")
 
@@ -1163,11 +1164,7 @@ class CrealityCFS:
     )
 
     def cmd_CFS_VERSION(self, gcmd) -> None:
-        """G-code: CFS_VERSION [BOX=<1-4>] — query version/SN.
-
-        Usage: CFS_VERSION         # query all boxes
-               CFS_VERSION BOX=1  # query box 1 only
-        """
+        """G-code: CFS_VERSION [BOX=<1-4>] — query version/SN."""
         if not self.is_connected:
             raise gcmd.error("CFS serial port is not connected")
 
@@ -1194,11 +1191,7 @@ class CrealityCFS:
     )
 
     def cmd_CFS_SET_MODE(self, gcmd) -> None:
-        """G-code: CFS_SET_MODE BOX=<1-4> MODE=<0-255> [PARAM=<0-255>].
-
-        Usage: CFS_SET_MODE BOX=1 MODE=1       # load mode
-               CFS_SET_MODE BOX=1 MODE=0       # standby mode
-        """
+        """G-code: CFS_SET_MODE BOX=<1-4> MODE=<0-255> [PARAM=<0-255>]."""
         if not self.is_connected:
             raise gcmd.error("CFS serial port is not connected")
 
@@ -1221,11 +1214,7 @@ class CrealityCFS:
     )
 
     def cmd_CFS_SET_PRELOAD(self, gcmd) -> None:
-        """G-code: CFS_SET_PRELOAD BOX=<1-4> MASK=<0-255> ENABLE=<0|1>.
-
-        Usage: CFS_SET_PRELOAD BOX=1 MASK=15 ENABLE=1   # enable all 4 slots
-               CFS_SET_PRELOAD BOX=1 MASK=1 ENABLE=0    # disable slot 0
-        """
+        """G-code: CFS_SET_PRELOAD BOX=<1-4> MASK=<0-255> ENABLE=<0|1>."""
         if not self.is_connected:
             raise gcmd.error("CFS serial port is not connected")
 
@@ -1278,10 +1267,12 @@ def load_config(config):
 
     Called by Klipper when it processes a [creality_cfs] section in printer.cfg.
 
-    Args:
-        config: Klipper config object for the [creality_cfs] section.
-
-    Returns:
-        CrealityCFS: Configured module instance.
+    Example configuration:
+        [creality_cfs]
+        serial_port: /dev/ttyUSB0
+        baud: 230400
+        box_count: 1
+        auto_init: True
+        retry_count: 3
     """
     return CrealityCFS(config)
