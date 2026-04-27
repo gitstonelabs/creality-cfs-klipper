@@ -359,3 +359,174 @@ baud rate, and CRC algorithm are identical across models.
 For implementation details, see `src/creality_cfs.py`.
 For command reference, see `docs/commands.md`.
 For capture setup, see `tools/capture_cfs_traffic.py`.
+
+---
+
+## Operational Sequences
+
+### Physical Filament Path
+
+```
+CFS Box (slots 1–4)
+  │
+  [slot N extruder motor]    ← box-side gear, pushes filament forward
+  │
+  [slot filament sensor]     ← detects filament in this slot's path
+  │
+  [4-way splitter/junction]  ← merges 4 paths into 1 Bowden tube
+  │
+  [filament buffer]          ← slack accumulator; fill sensor = BOX_GET_BUFFER_STATE
+  │                            box extruder pauses/resumes based on buffer state
+  [long Bowden tube]
+  │
+  [Nebula extruder]          ← toolhead motor takes over, pulls filament through
+  │
+  [filament cutter]          ← blade with hall sensor; triggered by X-axis motion
+  │                            (toolhead moves to right X-rail limit → lever pushes blade)
+  [hotend]
+```
+
+The box extruder and Nebula extruder run simultaneously during loading — box pushes,
+Nebula pulls. The buffer absorbs the rate difference between them.
+
+The cutter is triggered mechanically by the toolhead reaching the right X-rail limit,
+which presses a lever that pushes the cutter blade. The hall sensor on the blade
+confirms the cut occurred. No filament sensor is at the cutter position.
+
+### Boot Pre-load Sequence
+
+On startup, the CFS checks each slot for filament presence and parks all loaded
+filaments in a known position. Each slot that has filament detected is pre-loaded
+to the toolhead extruder, then retracted to clear the 4-way splitter.
+
+```
+For each slot 1–4:
+
+  1. Query filament sensor state for slot N
+     IF no filament → skip slot
+
+  2. CMD_EXTRUDE_PROCESS (0x10) — feed filament forward
+     Parameters: slot=N, length=full_path_length, velocity=slot_profile
+     Checkpoints verified in order:
+       - slot filament sensor (key836/key837 if blocked)
+       - 4-way splitter passage (key835 if blocked at connection)
+       - buffer fill sensor    (key864 if buffer not filled after extrude)
+       - Nebula extruder input (key838/key839 if not reached)
+
+  3. IF Nebula sensor triggered → pre-load success
+     IF timeout/sensor not triggered → error key835-key839
+
+  4. CMD_RETRUDE_PROCESS (0x11) — retract to park position
+     Parameters: slot=N, length=retract_until_clear_of_splitter
+     Goal: filament tip parked before the 4-way splitter junction
+     Only one path through the splitter is active at a time
+```
+
+The same sequence runs when new filament is inserted into a slot mid-session.
+
+### Tool Change Sequence (T0 → T1 during print)
+
+Confirmed from OrcaSlicer G-code analysis of a 3-color PLA/PETG/PLA print.
+The slicer generates the complete tool change G-code — no BOX_ commands appear
+in the file. The CFS is triggered entirely through the `T0`/`T1`/`T2`/`T3`
+G-code commands, which are caught by macros in `gcode_macro.cfg`.
+
+```
+[SLICER-GENERATED — runs before T1 command]
+  M220 S100                     reset feed rate to 100%
+  G4 S0                         sync point
+  M104 S{next_filament_temp}    PRE-HEAT new filament temp (e.g. S245 for PETG)
+  G4 S0                         sync point
+  G1 E-.8                       retract 0.8mm (prevent ooze during travel)
+  [spiral lift moves]           lift toolhead off print surface
+  G2 Z{z+0.4} I0.86 J0.86 ...  spiral lift (from change_filament_gcode profile)
+  G1 X260 Y180 F30000           MOVE TO CUT POSITION (X260 = right X-rail limit)
+                                 lever at X260 physically presses cutter blade
+  G1 Z{z_after_toolchange} F600 lower to print height
+  M106 S255 / M106 S0           fan pulse (cool filament stub for clean cut)
+
+[T1 COMMAND — intercepted by gcode_macro.cfg on the Hi]
+  T1
+  → CFS macro executes:
+     1. Hall sensor on cutter blade confirms cut (key841 if fails)
+     2. CMD_RETRUDE_PROCESS (0x11)
+        → box motor retracts T0 filament
+        → filament tip clears 4-way splitter, parks in slot tube
+     3. CMD_EXTRUDE_PROCESS (0x10)
+        → slot 1 box motor pushes T1 filament forward
+        → through splitter → buffer → Bowden → Nebula extruder → hotend
+  → Returns to slicer when T1 filament is loaded and ready
+
+[SLICER-GENERATED — runs after T1 returns]
+  M104 S{next_filament_temp}    confirm temperature (from filament_start_gcode)
+  G1 X{wipe_tower} F30000       move to wipe/purge tower position
+  G1 E.8 F2400                  un-retract (prime)
+  [wipe tower extrusion moves]  slicer-calculated purge volume printed as wipe tower
+  ; CP TOOLCHANGE END
+  [resume print]
+```
+
+Key findings from G-code analysis:
+
+- Temperature is managed by the slicer, not the CFS — M104 fires before T1,
+  not as a CFS notification during the change
+- The wipe tower purge is generated entirely by the slicer as G1 extrusion moves —
+  BOX_MATERIAL_CHANGE_FLUSH is likely only used for touchscreen-initiated changes
+- The cut position is X260 (confirmed: right X-rail limit on 260x260 bed)
+- The slicer interface to CFS is only T0/T1/T2/T3 — no BOX_ commands in print G-code
+- PETG uses longer pre-cut retract (filament_retraction_distances_when_cut=18mm)
+  while PLA uses the default (nil = shorter)
+
+### Slicer Filament Parameters (from analyzed G-code)
+
+These are the per-slot values that become CMD_EXTRUDE_PROCESS and CMD_RETRUDE_PROCESS
+parameters. Captured from OrcaSlicer 2.3.2 with Creality Hi profile:
+
+| Parameter | PLA (slots 1,3) | PETG (slot 2) |
+|-----------|----------------|---------------|
+| filament_max_volumetric_speed | **18 mm³/s** | **14 mm³/s** |
+| filament_loading_speed | **28 mm/s** | **28 mm/s** |
+| filament_loading_speed_start | **3 mm/s** | **3 mm/s** |
+| filament_unloading_speed | **90 mm/s** | **90 mm/s** |
+| filament_flow_ratio | 0.98 | 0.95 |
+| retraction_distances_when_cut | nil (short) | **18 mm** |
+| long_retractions_when_cut | 0 | **1 (enabled)** |
+| filament_change_length | 10 mm | 10 mm |
+
+The `filament_max_volumetric_speed` (velocity), `filament_loading_speed`, and
+`filament_unloading_speed` are the likely source of the `velocity` field in
+the CMD_EXTRUDE_PROCESS payload. RS485 capture will confirm encoding.
+
+### Per-Slot Filament Profile
+
+Each slot stores a profile used during extrude/retract operations:
+
+| Parameter | Source | Description |
+|-----------|--------|-------------|
+| `velocity` | Slicer / printer UI | Volumetric flow rate (mm³/s or mm/min) |
+| `temp` | Slicer / printer UI | Hotend target temperature for this filament |
+| `percent` | Slicer | Extrusion multiplier (flow %) |
+| `tnn` | Slot assignment | Slot identifier, e.g. "T1A", "T2B" |
+
+The slicer-provided values override whatever is set on the printer touchscreen.
+The CFS communicates temperature changes to the printer via `M104 S<temp>` during
+tool changes, requiring the Klipper module to handle incoming notifications from the CFS.
+
+### Incoming Notifications (CFS → Printer)
+
+During material change sequences, the CFS sends these commands to the printer host:
+
+| Command | Purpose |
+|---------|---------|
+| `M104 S<temp>` | Change hotend temperature for new filament |
+| `M204 S<accel>` | Adjust acceleration |
+| `SET_TMC_CURRENT STEPPER=stepper_x CURRENT=<A>` | Adjust X stepper current |
+| `SET_GCODE_VARIABLE MACRO=PRINTER_PARAM VARIABLE=hotend_temp VALUE=<temp>` | Store temp in printer params |
+| `G0 E<mm> F74.87` | Extrude filament (printer extruder, ~1.25 mm/s) |
+| `G0 E-<mm> F74.87` | Retract filament (printer extruder) |
+| `G4 P<ms>` | Dwell wait |
+
+These are delivered via the `notifications_addr` / `notifications_cmd` mechanism
+in `serial_485_wrapper.so`. The Klipper module must register response handlers to
+process these and forward them to the appropriate Klipper subsystems (heaters,
+motion system, etc.).
