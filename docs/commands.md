@@ -1,19 +1,18 @@
 # G-code Command Reference
 
-This document describes the G-code commands registered by the CFS Klipper module,
-plus the full inventory of commands identified from Creality firmware analysis.
+Commands registered by `creality_cfs.py` plus the full inventory from Creality
+firmware analysis.
 
 ---
 
 ## Module G-code Commands
 
-These commands are registered by `creality_cfs.py` and available in the Klipper console
-or from macros.
+All commands confirmed working on physical Creality Hi hardware (v1.1.0).
 
 ### CFS_INIT
 
-Runs the full 5-step auto-addressing sequence to discover and assign addresses to
-all connected CFS boxes. Should be run once on startup (or automatically via `auto_init: True`).
+Runs the full 5-step auto-addressing sequence to discover and assign addresses
+to all connected CFS boxes. Run once on startup, or set `auto_init: True` in config.
 
 ```
 CFS_INIT
@@ -30,15 +29,17 @@ CFS_STATUS           # query all boxes
 CFS_STATUS BOX=1     # query box 1 only
 ```
 
+Returns one of: `IDLE (0x0F)`, `BUSY (0x00)`, `ACTIVE (0x02)`
+
 Parameters:
-- `BOX`: Address of the CFS box (1-4, optional, default: all)
+- `BOX`: CFS box address (1-4, optional, default: all)
 
 ---
 
 ### CFS_VERSION
 
-Retrieves the firmware version and serial number string from a CFS box.
-Returns a 22-character ASCII string, e.g. `11010000843215B625AHSC`.
+Retrieves the firmware version and serial number string via CMD_GET_VERSION_SN (0x14).
+Returns a 22-character ASCII string.
 
 ```
 CFS_VERSION          # query all boxes
@@ -47,9 +48,63 @@ CFS_VERSION BOX=1    # query box 1 only
 
 ---
 
+### CFS_FW_VERSION
+
+Retrieves the firmware version string via CMD_VERSION_INFO (0xF0).
+Returns a more detailed build string than CFS_VERSION.
+
+```
+CFS_FW_VERSION BOX=1
+```
+
+Example output: `cfs0_050_G32-cfs0_000_113`
+
+Parameters:
+- `BOX`: CFS box address (1-4, required)
+
+---
+
+### CFS_EXTRUDE
+
+Runs the full CMD_EXTRUDE_PROCESS (0x10) sequence — starts the CFS motor,
+polls status, streams position feedback. Reports final filament position in mm.
+
+```
+CFS_EXTRUDE BOX=1
+```
+
+Example output:
+```
+CFS box 1 EXTRUDE: init_ok=True final_pos=399.84mm state=0xC4 polls=8
+```
+
+Position profile (confirmed from capture):
+- `~149mm` = filament moving, just started
+- `~338mm` = filament mid-path through buffer
+- `~400mm` = filament arrived at toolhead sensor (stable)
+
+Parameters:
+- `BOX`: CFS box address (1-4, required)
+
+---
+
+### CFS_RETRUDE
+
+Sends CMD_RETRUDE_PROCESS (0x11) — retracts filament back into the CFS box.
+One-shot command, acknowledges when retraction is complete.
+
+```
+CFS_RETRUDE BOX=1
+```
+
+Parameters:
+- `BOX`: CFS box address (1-4, required)
+
+---
+
 ### CFS_SET_MODE
 
-Sets the operating mode of a CFS box.
+Sets the operating mode of a CFS box via CMD_SET_BOX_MODE (0x04).
 
 ```
 CFS_SET_MODE BOX=1 MODE=1        # load mode
@@ -58,31 +113,32 @@ CFS_SET_MODE BOX=1 MODE=1 PARAM=1
 ```
 
 Parameters:
-- `BOX`: Address of the CFS box (1-4, required)
-- `MODE`: Mode byte (0=standby, 1=load; other values TBD)
+- `BOX`: CFS box address (1-4, required)
+- `MODE`: Mode byte (0=standby, 1=load)
 - `PARAM`: Mode parameter byte (default: 1)
 
 ---
 
 ### CFS_SET_PRELOAD
 
-Enables or disables pre-loading for specific slots on a CFS box.
+Enables or disables pre-loading for specific slots via CMD_SET_PRE_LOADING (0x0D).
 
 ```
 CFS_SET_PRELOAD BOX=1 MASK=15 ENABLE=1    # enable all 4 slots
-CFS_SET_PRELOAD BOX=1 MASK=1 ENABLE=0     # disable slot 0
+CFS_SET_PRELOAD BOX=1 MASK=1 ENABLE=0     # disable slot 1
 ```
 
 Parameters:
-- `BOX`: Address of the CFS box (1-4, required)
-- `MASK`: Bitmask for slots (0x01=slot1, 0x02=slot2, 0x04=slot3, 0x08=slot4, 0x0F=all)
+- `BOX`: CFS box address (1-4, required)
+- `MASK`: Bitmask (0x01=slot1, 0x02=slot2, 0x04=slot3, 0x08=slot4, 0x0F=all)
 - `ENABLE`: 1 to enable, 0 to disable
 
 ---
 
 ### CFS_ADDR_TABLE
 
-Prints the current address assignment table showing which boxes are online.
+Prints the current address assignment table showing which boxes are online,
+their UniIDs, and their current mode (APP or LOADER).
 
 ```
 CFS_ADDR_TABLE
@@ -90,45 +146,45 @@ CFS_ADDR_TABLE
 
 ---
 
-## Stubbed Commands (Not Yet Implemented)
+## Command Status Summary
 
-These methods exist in `creality_cfs.py` but raise `NotImplementedError` until
-the RS485 payload is captured and confirmed.
-
-| Method | Function Code | Klipper Equivalent | Status |
-|--------|--------------|-------------------|--------|
-| `extrude_process()` | 0x10 | `BOX_EXTRUDE_PROCESS` | Stub — payload unknown |
-| `retrude_process()` | 0x11 | `BOX_RETRUDE_PROCESS` | Stub — payload unknown |
-| `get_rfid()` | 0x02 | `BOX_GET_RFID` | Partial — empty payload sent, response format unknown |
-
-To implement these, capture RS485 traffic using `tools/capture_cfs_traffic.py`
-while triggering the corresponding operation on a stock Creality Hi printer.
+| G-code Command | Function Code | Status |
+|----------------|--------------|--------|
+| `CFS_INIT` | 0xA0/0xA1/0xA2/0xA3/0x0B | ✅ Confirmed |
+| `CFS_STATUS` | 0x08 | ✅ Confirmed (corrected from 0x0A in v1.1.0) |
+| `CFS_VERSION` | 0x14 | ✅ Confirmed |
+| `CFS_FW_VERSION` | 0xF0 | ✅ Confirmed from capture |
+| `CFS_EXTRUDE` | 0x10 | ✅ Confirmed from capture |
+| `CFS_RETRUDE` | 0x11 | ✅ Confirmed from capture |
+| `CFS_SET_MODE` | 0x04 | ✅ Confirmed |
+| `CFS_SET_PRELOAD` | 0x0D | ✅ Confirmed |
+| `CFS_ADDR_TABLE` | — | ✅ Local table |
+| `get_rfid()` | 0x02 | 🔵 Partial — response format unconfirmed |
 
 ---
 
 ## Complete Creality Firmware Command Inventory
 
-The following commands were identified from `strings` analysis of
-`box_wrapper.cpython-39.so` and `filament_rack_wrapper.cpython-39.so` on the
-Creality Hi. Function codes marked UNKNOWN require RS485 capture to determine.
+Commands identified from `strings` analysis of `box_wrapper.cpython-39.so`
+and `filament_rack_wrapper.cpython-39.so` on the Creality Hi.
 
 ### Box Commands (box_wrapper.so)
 
 | G-code Command | Function Code | Description |
 |----------------|--------------|-------------|
-| `BOX_GET_BOX_STATE` / `GET_BOX_STATE` | 0x0A | Query 4-byte box operating state |
-| `BOX_GET_VERSION_SN` | 0x14 | Query 22-byte firmware version + serial number |
-| `BOX_GET_RFID` | 0x02 (unconfirmed) | Read RFID tag from active spool slot |
-| `BOX_GET_REMAIN_LEN` | UNKNOWN | Query remaining filament length on spool |
-| `BOX_GET_BUFFER_STATE` | UNKNOWN | Query buffer/feeder sensor state |
-| `BOX_GET_FILAMENT_SENSOR_STATE` | UNKNOWN | Query per-slot filament sensor state |
+| `BOX_GET_BOX_STATE` | **0x08** | Get box state byte (corrected from 0x0A) |
+| `BOX_GET_VERSION_SN` | 0x14 | 22-byte firmware version + serial number |
+| `BOX_GET_RFID` | 0x02 | Read RFID tag from active spool slot |
+| `BOX_GET_REMAIN_LEN` | 0x0F | Query remaining filament length (seen in capture) |
+| `BOX_GET_BUFFER_STATE` | UNKNOWN | Buffer sensor state (buffer is GPIO, may not exist as RS485 cmd) |
+| `BOX_GET_FILAMENT_SENSOR_STATE` | UNKNOWN | Per-slot filament sensor state |
 | `BOX_GET_HARDWARE_STATUS` | UNKNOWN | Hardware diagnostic query |
-| `BOX_SET_BOX_MODE` / `SET_BOX_MODE` | 0x04 | Set box operating mode |
+| `BOX_SET_BOX_MODE` | 0x04 | Set box operating mode |
 | `BOX_SET_PRE_LOADING` | 0x0D | Configure pre-loading slot mask |
 | `BOX_SET_CURRENT_BOX_IDLE_MODE` | UNKNOWN | Set per-slot idle mode |
 | `BOX_SET_TEMP` | UNKNOWN | Set temperature target |
 | `BOX_EXTRUDE_MATERIAL` | UNKNOWN | Push filament from box toward extruder |
-| `BOX_EXTRUDE_PROCESS` | 0x10 | Full extrude state machine |
+| `BOX_EXTRUDE_PROCESS` | **0x10** | Full extrude state machine (confirmed) |
 | `BOX_EXTRUDE_2_PROCESS` | UNKNOWN | Secondary extrude process |
 | `BOX_EXTRUDER_EXTRUDE` | UNKNOWN | Extrude through extruder gear |
 | `BOX_EXTRUDE_ZLIFT` | UNKNOWN | Z-lift during extrude |
@@ -137,7 +193,7 @@ Creality Hi. Function codes marked UNKNOWN require RS485 capture to determine.
 | `BOX_TN_EXTRUDE` | UNKNOWN | Tool-N extrude (channel-specific) |
 | `BOX_RETRUDE_MATERIAL` | UNKNOWN | Retract filament into box |
 | `BOX_RETRUDE_MATERIAL_WITH_TNN` | UNKNOWN | Retract with channel selector |
-| `BOX_RETRUDE_PROCESS` | 0x11 | Full retract state machine |
+| `BOX_RETRUDE_PROCESS` | **0x11** | Full retract state machine (confirmed) |
 | `BOX_CUT_MATERIAL` | UNKNOWN | Cut filament |
 | `BOX_CUT_POS_DETECT` | UNKNOWN | Detect/calibrate cutter position |
 | `BOX_CUT_STATE` | UNKNOWN | Query cutter state |
@@ -151,7 +207,7 @@ Creality Hi. Function codes marked UNKNOWN require RS485 capture to determine.
 | `BOX_GET_FLUSH_VELOCITY_TEST` | UNKNOWN | Test flush speed |
 | `BOX_SHOW_FLUSH_LIST` | UNKNOWN | Display flush schedule |
 | `BOX_CREATE_CONNECT` | UNKNOWN | Establish CFS connection |
-| `BOX_UPDATE_CONNECT` | UNKNOWN | Update connection state (ADDR, NUM params) |
+| `BOX_UPDATE_CONNECT` | UNKNOWN | Update connection state |
 | `BOX_CTRL_CONNECTION_MOTOR_ACTION` | UNKNOWN | Control connection motor |
 | `BOX_COMMUNICATION_TEST` | UNKNOWN | Diagnostic communication test |
 | `BOX_MODIFY_TN` | UNKNOWN | Modify tool-N slot data |
@@ -167,7 +223,7 @@ Creality Hi. Function codes marked UNKNOWN require RS485 capture to determine.
 | `BOX_BLOW` | UNKNOWN | Air blow for path cleaning |
 | `BOX_MOVE_TO_SAFE_POS` | UNKNOWN | Emergency safe position |
 | `BOX_ENABLE_AUTO_REFILL` | UNKNOWN | Enable automatic refill |
-| `BOX_CHECK_MATERIAL_REFILL` | UNKNOWN | Check if refill is needed |
+| `BOX_CHECK_MATERIAL_REFILL` | UNKNOWN | Check if refill needed |
 | `BOX_ENABLE_CFS_PRINT` | UNKNOWN | Enable CFS during print |
 | `BOX_TIGHTEN_UP_ENABLE` | UNKNOWN | Tension control |
 | `BOX_MEASURING_WHEEL` | UNKNOWN | Measuring wheel calibration |
@@ -192,9 +248,6 @@ Creality Hi. Function codes marked UNKNOWN require RS485 capture to determine.
 
 ### Filament Rack Commands (filament_rack_wrapper.so)
 
-The filament rack is the multi-spool carousel inside the CFS box. It appears to be
-a separate addressable entity from the box controller.
-
 | G-code Command | Function Code | Description |
 |----------------|--------------|-------------|
 | `FILAMENT_RACK` | UNKNOWN | Main rack control command |
@@ -207,17 +260,17 @@ a separate addressable entity from the box controller.
 
 ---
 
-## Known Error Codes (from box_wrapper.so strings)
+## Known Error Codes
 
 | Key | Message |
 |-----|---------|
 | key835 | extrude error, maybe it's blocked at the connections |
-| key836 | extrude error, maybe there's a blockage between the connections and the filament sensor |
-| key837 | extrude error, maybe there is a blockage between the filament sensor and the extrusion gear |
-| key838 | extrude error, through the connections but not extrude |
+| key836 | extrude error, blockage between connections and filament sensor |
+| key837 | extrude error, blockage between filament sensor and extrusion gear |
+| key838 | extrude error, through the connections but not extruding |
 | key839 | filament error, no filament detected at box extrude position |
 | key841 | cut error, cut sensor not detected, cutting not rebound |
-| key846 | empty printing, box speed is smaller than extruder |
+| key846 | empty printing, box speed is smaller than extruder speed |
 | key852 | check extruder filament sensor and box sensor state |
 | key854 | the presence of filament when cutting detected |
 | key855 | cut position error |
@@ -225,42 +278,49 @@ a separate addressable entity from the box controller.
 | key857 | motor load error |
 | key864 | extrude error, extrude but not trigger buffer full limit |
 
-These error keys correspond to messages in Creality's UI translation files.
-
 ---
 
-## Physical Filament Path (inferred from error messages)
+## Physical Filament Path
 
 ```
-CFS Box
-  [filament reel / spool slot 1-4]
+CFS Box (slots 1-4)
+  [filament reel / spool]
        ↓
-  [connections / coupling joint] ← key835: blockage here
+  [connections / coupling joint]    ← key835: blockage here
        ↓
-  [box-side filament sensor] ← key836: blockage between joint and sensor
+  [box-side filament sensor]        ← key836: blockage between joint and sensor
        ↓
-  [box extrusion gear] ← key837: blockage between sensor and gear
-       ↓              ← key838: gear turned but filament didn't exit
-  [in-line buffer]     ← key864: extrude successful but buffer not filled
+  [box extrusion gear / motor]      ← key837: blockage between sensor and gear
+       ↓                            ← key838: gear turned, filament didn't exit
+  [4-way splitter/junction]         ← merges 4 slot paths into 1 Bowden tube
        ↓
+  [filament buffer]                 ← key864: extrude OK but buffer not filled
+       ↓                            ← buffer state via GPIO pins 2/3, NOT RS485
   [Bowden tube to printer]
        ↓
-  [cutter] ← key841: cut sensor not triggered; key854: filament present at cut
-       ↓
-  [extruder]
+  [filament cutter]                 ← key841: cut sensor not triggered
+       ↓                            ← key854: filament present at cut position
+  [Nebula / toolhead extruder]
        ↓
   [hotend]
 ```
+
+The box extruder motor and toolhead extruder run simultaneously during loading
+— box pushes, toolhead pulls. The buffer absorbs the rate difference.
+
+The cutter is triggered mechanically by the toolhead reaching the right X-rail
+limit (X=260 on the Creality Hi 260x260 bed). The lever at that position
+depresses the cutter blade. A hall sensor or mechanical switch confirms the cut.
 
 ---
 
 ## Notes
 
-- All commands use 8N1 serial framing at 230400 baud (confirmed).
-- Commands marked UNKNOWN require RS485 traffic capture to determine function codes and payloads.
-- STATUS byte for operational command requests is currently assumed 0xFF but unconfirmed.
-  Capture will validate this. If commands fail on non-Creality hardware, try STATUS=0x00.
-- The CFS does not require RTS pin toggling; direction control is handled by auto-direction
-  hardware on the CFS side.
+- All commands use 8N1 at 230400 baud (confirmed from capture)
+- `STATUS=0xFF` for operational requests confirmed from live capture (v1.1.0)
+- Buffer state is GPIO-only — no RS485 command needed or observed
+- `CMD_GET_BUFFER_STATE` from box_wrapper.so strings may not exist as a
+  separate RS485 command since the buffer uses direct GPIO lines
 
-For protocol-level details including frame format and CRC algorithm, see `protocol.md`.
+For protocol details see `docs/protocol.md`.
+For hardware pinout see `docs/hardware.md`.

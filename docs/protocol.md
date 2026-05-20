@@ -1,34 +1,66 @@
 # CFS RS485 Protocol Specification
 
-This document outlines the RS485 communication protocol used by the Creality Filament
-System (CFS) and implemented in this Klipper integration.
-
 Protocol reverse-engineered from:
 - `CrealityOfficial/Hi_Klipper` — `auto_addr_wrapper.py` (full Python source, GPL-3.0)
 - `strings` analysis of `box_wrapper.cpython-39.so` and `serial_485_wrapper.cpython-39.so`
+- Live RS485 traffic captures during T0→T1→T2→T3 tool changes on Creality Hi
 - Cross-referenced with `ityshchenko/klipper-cfs` and `fake-name/cfs-reverse-engineering`
-- RS485 traffic captures (pending for 0x10/0x11 payload validation)
+
+Raw capture files: see [`captures/`](../captures/)
 
 ---
 
 ## Physical Layer
 
-| Parameter | Value |
-|-----------|-------|
-| Interface | RS485 (half-duplex) |
-| Baud rate | 230400 (confirmed from box.cfg and serial_485_wrapper.so) |
-| Data format | 8N1 (8 data bits, no parity, 1 stop bit) |
-| Connector | Yeonho SMW200-08 (2mm pitch, 8-pin) |
-| Termination | 300Ω pull-up/down bias resistors (non-standard) |
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| Interface | RS485 half-duplex | hardware |
+| Baud rate | 230400 | box.cfg + serial_485_wrapper.so + capture confirmed |
+| Data format | 8N1 | hardware |
+| Connector | 6-pin daisy-chain (see hardware.md) | measured |
+| Termination | 300Ω pull-up/down bias resistors | hardware |
 
 Direction control is handled automatically by the CFS hardware. RTS pin toggling
 is not required from the host side.
 
 ---
 
+## 6-Pin Connector Pinout
+
+Confirmed with multimeter on Creality Hi (locking latch on top, reading left to right,
+top row pins 1-3, bottom row pins 4-6):
+
+| Pin | Wire | Idle Voltage | Triggered | Function |
+|-----|------|-------------|-----------|----------|
+| 1 | Red | ~1.75V | — | RS485-A |
+| 2 | White | 0.01V | 3.3V | Buffer switch 1 (GPIO, not RS485) |
+| 3 | Black | 3.3V | 0.01V | Buffer switch 2 (inverted pair of pin 2) |
+| 4 | Yellow | 24V | — | 24V power |
+| 5 | Green | 0V | — | GND |
+| 6 | Blue | ~1.74V | — | RS485-B |
+
+**Important:** Pins 2 and 3 are direct GPIO buffer switch signals, NOT RS485 data.
+No RS485 traffic is generated when the buffer triggers — these are hardware lines
+read directly by the printer as GPIO inputs.
+
+**Daisy-chain topology:**
+```
+Printer (1x 6-pin OUT)
+  → CFS1 port1 (IN) — CFS1 port2 (OUT)
+  → CFS2 port1 (IN) — CFS2 port2 (OUT)
+  → CFS3 port1 (IN) — CFS3 port2 (OUT)
+  → CFS4 port1 (IN) — CFS4 port2 (OUT)
+  → Filament buffer (terminator, 1x 6-pin IN)
+```
+
+Buffer switch signals are per-segment — pin 2/3 on the Printer→CFS1 link carry
+CFS1's buffer state only. Each segment has its own independent buffer signals.
+
+---
+
 ## Frame Format
 
-Every message on the bus follows this structure:
+Every RS485 message follows this structure:
 
 ```
 [HEAD] [ADDR] [LENGTH] [STATUS] [FUNC] [DATA...] [CRC8]
@@ -37,41 +69,35 @@ Every message on the bus follows this structure:
 
 | Field | Size | Description |
 |-------|------|-------------|
-| HEAD | 1 byte | Always `0xF7` — start of frame |
-| ADDR | 1 byte | Destination address (see Addressing section) |
-| LENGTH | 1 byte | Byte count from STATUS through CRC inclusive: `len(DATA) + 3` |
-| STATUS | 1 byte | `0xFF` for operational commands (UNCONFIRMED — see note below); `0x00` for addressing commands and all responses |
-| FUNC | 1 byte | Function code (command identifier) |
-| DATA | 0–N bytes | Variable-length payload. Maximum observed: 100 bytes |
-| CRC8 | 1 byte | CRC-8/SMBUS over `msg[2:-1]` (from LENGTH through last DATA byte) |
+| HEAD | 1 byte | Always `0xF7` |
+| ADDR | 1 byte | Destination address |
+| LENGTH | 1 byte | Bytes from STATUS through CRC inclusive: `len(DATA) + 3` |
+| STATUS | 1 byte | `0xFF` for operational requests (confirmed); `0x00` for addressing and all responses |
+| FUNC | 1 byte | Function/command code |
+| DATA | 0-N bytes | Variable payload |
+| CRC8 | 1 byte | CRC-8/SMBUS over `msg[2:-1]` |
 
-**Minimum frame length:** 6 bytes (HEAD + ADDR + LENGTH + STATUS + FUNC + CRC, no data)
-
-**STATUS byte note:** The `auto_addr_wrapper.py` source always uses `STATUS=0x00` for
-outbound messages. The value `0xFF` for operational command requests is inferred from
-response patterns and has not been confirmed via live capture. Pending capture of a
-`CMD_SET_BOX_MODE` request to validate. If commands fail to respond, try `STATUS=0x00`.
+**Note on short frames:** Some responses (e.g. CMD_GET_BOX_STATE) use a 6-byte
+frame with no separate DATA field. In these frames the state value occupies the
+final byte position and there is no CRC. This was confirmed by computing expected
+CRC values against observed bytes — they do not match, confirming the last byte
+is data, not CRC.
 
 ---
 
 ## CRC Algorithm
 
-**Type:** CRC-8/SMBUS (confirmed from `auto_addr_wrapper.py` source)
+**Type:** CRC-8/SMBUS — confirmed from `auto_addr_wrapper.py` source and validated
+against 16 live capture test vectors.
+
 - Polynomial: `0x07`
 - Initial value: `0x00`
-- No reflection
-- No final XOR
+- No reflection, no final XOR
 - Bit order: MSB-first
-
-**CRC scope:** `msg[2:-1]` — from the LENGTH byte through the last DATA byte,
-excluding HEAD, ADDR, and the CRC byte itself.
+- Scope: `msg[2:-1]` (LENGTH byte through last DATA byte)
 
 ```python
 def crc8_cfs(data: bytes) -> int:
-    """CRC-8/SMBUS, poly=0x07, init=0x00, MSB-first, no XOR-out.
-    Confirmed from CrealityOfficial/Hi_Klipper auto_addr_wrapper.py.
-    Validated against 16 captured test vectors.
-    """
     crc = 0x00
     for byte in data:
         crc ^= byte
@@ -84,11 +110,11 @@ def crc8_cfs(data: bytes) -> int:
     return crc
 ```
 
-**Test vector:**
+Test vector (confirmed from live capture):
 ```
 Message:   F7 01 03 00 A3 DD
-CRC scope: 03 00 A3         (msg[2:-1])
-Expected:  0xDD             ✓
+CRC scope: 03 00 A3
+Expected:  0xDD  ✓
 ```
 
 ---
@@ -97,14 +123,13 @@ Expected:  0xDD             ✓
 
 | Address | Type | Target |
 |---------|------|--------|
-| 0x01–0x04 | Unicast | Individual material boxes |
+| 0x01–0x04 | Unicast | Individual CFS boxes |
+| 0x81–0x84 | Unicast | Closed-loop servo motors |
+| 0x91–0x92 | Unicast | Belt tension motors |
 | 0xFC | Broadcast | Belt tension motors only |
 | 0xFD | Broadcast | Closed-loop servo motors only |
 | 0xFE | Broadcast | Material boxes only |
 | 0xFF | Broadcast | All devices |
-
-Closed-loop motor addresses: 0x81–0x84
-Belt tension motor addresses: 0x91–0x92
 
 Each device has a 12-byte UniID for permanent identification. Addresses are
 assigned dynamically at boot via the auto-addressing sequence.
@@ -113,140 +138,211 @@ assigned dynamically at boot via the auto-addressing sequence.
 
 ## Auto-Addressing Sequence
 
-On startup, the host runs this 5-step sequence to discover and assign addresses:
+On startup, the host runs this 5-step sequence:
 
 ```
-Step 1: Host → 0xFF broadcast CMD_LOADER_TO_APP (0x0B)
-        Wakes any devices stuck in bootloader mode.
+Step 1: Host → 0xFF  CMD_LOADER_TO_APP (0x0B)
+        Wakes devices stuck in bootloader. Response includes version word.
 
-Step 2: Host → 0xFE broadcast CMD_GET_SLAVE_INFO (0xA1) [repeated per expected box]
-        Each unaddressed box responds with: [dev_type][mode][uniid_12bytes]
-        Host allocates an address from 0x01–0x04 for each discovered UniID.
+Step 2: Host → 0xFE  CMD_GET_SLAVE_INFO (0xA1) [once per expected box]
+        Unaddressed box responds: [dev_type][mode][uniid_12bytes]
+        Host allocates an address 0x01-0x04 per UniID.
 
-Step 3: Host → 0xFE broadcast CMD_SET_SLAVE_ADDR (0xA0) [per discovered box]
+Step 3: Host → 0xFE  CMD_SET_SLAVE_ADDR (0xA0) [per discovered box]
         Payload: [assigned_addr][uniid_12bytes]
         Box with matching UniID claims the address and acknowledges.
 
-Step 4: Host → unicast CMD_ONLINE_CHECK (0xA2) to each assigned address
-        Box responds with: [dev_type][mode][uniid]
-        Confirms the address assignment is stable.
+Step 4: Host → unicast  CMD_ONLINE_CHECK (0xA2) to each assigned address
+        Confirms address assignment is stable.
 
-Step 5: Host → unicast CMD_GET_ADDR_TABLE (0xA3) to each address
-        Final confirmation and table synchronization.
+Step 5: Host → unicast  CMD_GET_ADDR_TABLE (0xA3) to each address
+        Final confirmation and table sync.
 ```
 
-After addressing, the host sends `CMD_ONLINE_CHECK` to all addressed boxes
-every 1.5 seconds (10 seconds during printing). Three consecutive failures
-mark a box as offline.
+After addressing, `CMD_ONLINE_CHECK` is sent every 1.5 seconds (10s during print).
+Three consecutive failures mark a box offline.
+
+**Note:** If a CFS box already has an address stored from a previous session, it
+responds to `CMD_ONLINE_CHECK (0xA2)` but not to the `CMD_GET_SLAVE_INFO (0xA1)`
+broadcast. This is expected behavior — the box considers itself already addressed.
 
 ---
 
 ## Command Set
 
-### Addressing Commands (STATUS = 0x00 confirmed for both request and response)
+### Addressing Commands (STATUS = 0x00 for both request and response)
 
-| Code | Name | Request Payload | Response Payload | Confidence |
-|------|------|----------------|-----------------|-----------|
-| 0x0B | CMD_LOADER_TO_APP | `[0x01]` | None | 97% |
-| 0xA1 | CMD_GET_SLAVE_INFO | `[broadcast_addr][broadcast_addr]` | `[dev_type][mode][uniid_12B]` | 97% |
-| 0xA0 | CMD_SET_SLAVE_ADDR | `[target_addr][uniid_12B]` | `[dev_type][mode][uniid_12B]` | 97% |
-| 0xA2 | CMD_ONLINE_CHECK | `[]` (empty) | `[dev_type][mode][uniid_12B]` | 95% |
-| 0xA3 | CMD_GET_ADDR_TABLE | `[]` (empty) | `[dev_type][mode][uniid_12B]` | 95% |
+| Code | Name | Request Payload | Response Payload |
+|------|------|----------------|-----------------|
+| 0x0B | CMD_LOADER_TO_APP | `[0x01]` | 4-byte version word |
+| 0xA1 | CMD_GET_SLAVE_INFO | `[0xFE][0xFE]` | `[dev_type][mode][uniid_12B]` |
+| 0xA0 | CMD_SET_SLAVE_ADDR | `[target_addr][uniid_12B]` | `[dev_type][mode][uniid_12B]` |
+| 0xA2 | CMD_ONLINE_CHECK | `[]` empty | `[dev_type][mode][uniid_12B]` |
+| 0xA3 | CMD_GET_ADDR_TABLE | `[]` empty | `[dev_type][mode][uniid_12B]` |
 
-### Operational Commands (STATUS byte for request UNCONFIRMED — see note above)
+### Operational Commands (STATUS = 0xFF for requests, confirmed from capture)
 
-| Code | Name | Request Payload | Response Payload | Confidence |
-|------|------|----------------|-----------------|-----------|
-| 0x02 | CMD_GET_RFID | Unknown (possibly `[slot_num]`) | RFID string (format TBD) | 80% |
-| 0x04 | CMD_SET_BOX_MODE | `[mode][param]` | ACK: `F7 01 03 00 04 A1` | 97% |
-| 0x0A | CMD_GET_BOX_STATE | `[]` (empty) | `[state][?][?][?]` (4 bytes) | 97% |
+| Code | Name | Request Payload | Response | Confidence |
+|------|------|----------------|----------|-----------|
+| 0x02 | CMD_GET_RFID | `[slot_num]` (unconfirmed) | RFID string | 80% |
+| 0x04 | CMD_SET_BOX_MODE | `[mode][param]` | ACK | 97% |
+| 0x08 | CMD_GET_BOX_STATE | `[param]` | `[state]` 1 byte | **100% confirmed** |
 | 0x0D | CMD_SET_PRE_LOADING | `[slot_mask][enable]` | ACK | 93% |
-| 0x10 | CMD_EXTRUDE_PROCESS | **UNKNOWN** — see analysis below | TBD | 90% |
-| 0x11 | CMD_RETRUDE_PROCESS | **UNKNOWN** — see analysis below | TBD | 90% |
-| 0x14 | CMD_GET_VERSION_SN | `[]` (empty) | 22-byte ASCII string | 97% |
+| 0x0F | CMD_GET_REMAIN_LEN | `[0x01]` | TBD | seen in capture |
+| 0x10 | CMD_EXTRUDE_PROCESS | see below | see below | **100% confirmed** |
+| 0x11 | CMD_RETRUDE_PROCESS | see below | see below | **100% confirmed** |
+| 0x14 | CMD_GET_VERSION_SN | `[]` empty | 22-byte ASCII string | 97% |
+| 0xF0 | CMD_VERSION_INFO | `[0x00]` | ASCII version string | **100% confirmed** |
 
 ---
 
-## Payload Analysis: 0x10 and 0x11
+## CMD_GET_BOX_STATE (0x08) — Confirmed
 
-The exact byte layout of CMD_EXTRUDE_PROCESS and CMD_RETRUDE_PROCESS is locked
-in `box_wrapper.cpython-39.so`. However, `strings` analysis reveals the parameters.
+**Corrected in v1.1.0** — was incorrectly documented as 0x0A (which is LOADER_TO_APP).
 
-### CMD_EXTRUDE_PROCESS (0x10)
-
-From `box_wrapper.so` format strings:
 ```
-G0 E%f F74.87        → length parameter is a float (mm)
-G4 P%d               → dwell time (ms) used in sequence
-Tn_extrude_percent[%s] and Tn_extrude_velocity[%s] mismatch
-extrude = %s, velocity: %s, temp: %s, percent: %s, tnn: %s
-```
+REQ: f7 [addr] 04 ff 08 [param]
+RSP: f7 [addr] 04 00 08 [state]
 
-**Inferred payload fields:**
-- Slot/channel identifier (TNN string like "T1A" or encoded slot number 1B)
-- Extrude length in mm (float or fixed-point integer)
-- Velocity / feedrate
-- Temperature (passed to hotend)
-- Percent (extrusion multiplier)
+param: 0x00 = standard poll
+       0x01 = poll with transition trigger
 
-The feedrate `F74.87` (~1.25 mm/s) appears hardcoded for box-side extrusion.
-The printer extruder uses a separate speed from the `Tn_extrude_velocity` parameter.
-
-### CMD_RETRUDE_PROCESS (0x11)
-
-From `box_wrapper.so` format strings:
-```
-G0 E-%f F74.87       → retract length (negative, same feedrate as extrude)
-retrude error, failed to exit connections   (key849)
-retrude error, multiple connections triggered, addr: %d   (key850)
+state: 0x0F = IDLE    (standby, normal polling response)
+       0x00 = BUSY    (transitioning/executing)
+       0x02 = ACTIVE  (active during retract sequence)
 ```
 
-The source comment says: *"In order to save filament, retract 30mm before cutting"*
-suggesting a default retract length of 30mm when no explicit length is given.
+The response last byte is the state value — no CRC on short frames (confirmed
+by computing expected CRC: does not match observed value).
 
-**Inferred payload fields:**
-- Slot/channel identifier (same as extrude)
-- Retract length in mm
-- Velocity
+---
 
-### Capture instructions
+## CMD_EXTRUDE_PROCESS (0x10) — Confirmed from capture
 
-To determine the exact byte layout, capture RS485 traffic on the CFS line
-while triggering a T0→T1 tool change:
+Three sub-commands sent in sequence per tool change:
 
-```bash
-python3 tools/capture_cfs_traffic.py \
-    --port /dev/ttyUSB0 \
-    --baud 230400 \
-    --filter-func 0x10 0x11 \
-    --segment tool-change
+### Sub-command 0x02/0x00 — Init/start
+
+```
+REQ: f7 01 06 ff 10 02 00 00 [crc]
+RSP: f7 01 04 00 10 00 [crc]    ← 1-byte response: 0x00 = success
 ```
 
-The first 0x10 frame you capture will reveal:
-1. The STATUS byte (0xFF or 0x00 — also answers the open question above)
-2. The LENGTH field (tells you total payload size)
-3. The DATA bytes (the actual parameters)
+Sent once to start the extrusion motor.
+
+### Sub-command 0x02/0x04 — Status poll
+
+```
+REQ: f7 01 06 ff 10 02 04 00 [crc]
+RSP: f7 01 03 00 10 [crc]       ← ACK only, no payload
+```
+
+Sent periodically during extrusion to check status.
+
+### Sub-command 0x02/0x05 — Streaming position feedback
+
+```
+REQ: f7 01 06 ff 10 02 05 00 [crc]
+RSP: f7 01 07 00 10 [state] [pos_hi] [pos_lo] [crc]
+```
+
+Response payload (3 bytes):
+- `state` (1 byte): `0xC3` = accelerating, `0xC4` = at speed
+- `pos_hi`, `pos_lo` (2 bytes): uint16 big-endian, filament position in 0.01mm units
+
+Position profile observed across multiple tool changes:
+```
+state=0xC3  pos≈588mm  (wrap-around during acceleration, not valid)
+state=0xC4  pos≈149mm  (filament moving, just started)
+state=0xC4  pos≈338mm  (filament mid-path through buffer)
+state=0xC4  pos≈400mm  (filament arrived at toolhead sensor — stable)
+```
+
+Filament path length confirmed: **~398-400mm** from CFS motor to toolhead sensor.
+
+### Full sequence per tool change
+
+```
+GET_BOX_STATE (0x08)   pre-check
+GET_REMAIN_LEN (0x0F)  check remaining filament
+SET_BOX_MODE (0x04)    prepare
+EXTRUDE 0x02/0x00      start motor
+EXTRUDE 0x02/0x04      status poll
+EXTRUDE 0x02/0x05      stream × N  (until position stabilizes ~400mm)
+EXTRUDE 0x02/0x04      status poll
+EXTRUDE 0x02/0x05      stream × N  (confirmation)
+SET_BOX_MODE (0x04)    transition
+RETRUDE 0x02/0x01      retract (one-shot)
+EXTRUDE 0x02/0x00      start next load cycle (purge)
+  ... repeats
+```
+
+---
+
+## CMD_RETRUDE_PROCESS (0x11) — Confirmed from capture
+
+One-shot command, no streaming feedback:
+
+```
+REQ: f7 [addr] 05 ff 11 02 01 [crc]
+RSP: f7 [addr] 03 00 11 [crc]      ← ACK only
+
+Payload bytes: 0x02 = sub-command, 0x01 = mode/slot flag
+```
+
+Always the same payload in all observed captures. Retraction is fire-and-confirm.
+
+---
+
+## CMD_VERSION_INFO (0xF0) — Confirmed from capture
+
+```
+REQ: f7 [addr] 04 ff f0 00 [crc]
+RSP: f7 [addr] 1c 00 f0 [28 bytes ASCII] [crc]
+
+CFS box:          'cfs0_050_G32-cfs0_000_113'
+Motor controller: 'mot2_023_C30-mot2_002_071'
+```
 
 ---
 
 ## Bidirectional Communication
 
-The CFS is not purely a slave. During material change sequences, the CFS sends
-commands **back to the printer** (confirmed from `box_wrapper.so` format strings):
+During material change sequences, the CFS sends commands back to the printer host
+(confirmed from `box_wrapper.so` strings analysis):
 
-```
-M104 S%d                                    → set hotend temperature
-M204 S%d / M204 S%s                         → set acceleration
-SET_TMC_CURRENT STEPPER=stepper_x CURRENT=%f → adjust stepper current
-SET_GCODE_VARIABLE MACRO=PRINTER_PARAM...   → update printer parameters
-G0 E%f F74.87                               → extrude filament (printer side)
-G0 E-%f F74.87                              → retract filament (printer side)
-G4 P%d                                      → dwell
-```
+| Command | Purpose |
+|---------|---------|
+| `M104 S<temp>` | Change hotend temperature |
+| `M204 S<accel>` | Adjust acceleration |
+| `SET_TMC_CURRENT STEPPER=stepper_x CURRENT=<A>` | Adjust X stepper current |
+| `G0 E<mm> F74.87` | Extrude filament (~1.25 mm/s) |
+| `G0 E-<mm> F74.87` | Retract filament |
+| `G4 P<ms>` | Dwell |
 
-This is implemented via the `notifications_addr` and `notifications_cmd` mechanism
-in `serial_485_wrapper.so`. The host Klipper instance must handle these unsolicited
-callbacks from the CFS during tool-change sequences.
+Delivered via `notifications_addr` / `notifications_cmd` in `serial_485_wrapper.so`.
+The Klipper module must register response handlers to process these callbacks.
+
+---
+
+## Buffer State
+
+Buffer state is **not communicated over RS485**. The buffer switch signals on
+pins 2 and 3 of the 6-pin connector are direct GPIO lines:
+
+- Pin 2 (white): `0.01V idle / 3.3V triggered` = buffer triggered (active high)
+- Pin 3 (black): `3.3V idle / 0.01V triggered` = inverted pair (active low)
+
+Only one pin needs to be wired to a GPIO input on the host. Use Klipper's native
+`[filament_switch_sensor]` to read buffer state:
+
+```ini
+[filament_switch_sensor cfs_buffer]
+switch_pin: ^YOUR_GPIO_PIN
+pause_on_runout: false
+runout_gcode:
+    RESPOND MSG="CFS buffer triggered"
+```
 
 ---
 
@@ -254,7 +350,7 @@ callbacks from the CFS during tool-change sequences.
 
 From `strings` analysis of `serial_485_wrapper.cpython-39.so`:
 
-**Frame position constants (internal):**
+Frame position constants:
 ```
 HEAD_POS  = 0   (0xF7)
 ADDR_POS  = 1
@@ -264,15 +360,10 @@ CMD_POS   = 4
 DATA_POS  = 5
 ```
 
-**Class hierarchy:**
-- `Serialhdl_485` — low-level UART handler: `connect_uart`, `raw_send`,
-  `raw_send_wait_ack`, `get_response`, `register_response`, `_bg_thread`
-- `Serial_485_Wrapper` — high-level queue manager: `cmd_send_data_with_response`,
-  `cmd_485_send_data`, `send_queue_process`, `handle_callback`, `register_response`
-
-The `cmd_send_data_with_response(data, timeout, retry_en)` interface is the main
-send path. The `retry_en` bool controls whether the transport layer retries
-automatically (the addressing layer disables this and retries at the application layer).
+Class hierarchy:
+- `Serialhdl_485` — low-level UART: `connect_uart`, `raw_send`, `get_response`
+- `Serial_485_Wrapper` — high-level queue: `cmd_send_data_with_response`,
+  `send_queue_process`, `handle_callback`, `register_response`
 
 ---
 
@@ -280,218 +371,49 @@ automatically (the addressing layer disables this and retries at the application
 
 From `strings` analysis of `box_wrapper.cpython-39.so`:
 
-| Key | Error | Parameters |
-|-----|-------|-----------|
-| key831 | serial_485 communication timeout | addr or cmd |
-| key834 | params error, send data | payload hex |
-| key835 | extrude error: blocked at connections | addr, tnn |
-| key836 | extrude error: blockage between connections and filament sensor | addr, tnn |
-| key837 | extrude error: blockage between filament sensor and extrusion gear | addr, tnn |
-| key838 | extrude error: through connections but not extruding | addr, tnn |
-| key839 | filament error: no filament detected at box extrude position | addr, tnn |
-| key840 | box switch state error | addr, cmd |
-| key841 | cut error: cut sensor not detected, not rebounded | — |
-| key843 | RFID error: get rfid failed | addr, rfid_string |
-| key846 | empty printing: box speed < extruder speed | — |
-| key848 | material error: may be broken at connections | addr, tnn |
-| key849 | retrude error: failed to exit connections | addr, tnn |
-| key850 | retrude error: multiple connections triggered | addr |
-| key852 | check extruder filament sensor and box sensor state | — |
-| key853 | humidity sensor error | addr |
-| key854 | filament present when cutting detected | — |
-| key855 | cut position error | cut_pos_x |
-| key856 | no cutter | — |
-| key857 | motor load error | — |
-| key858 | errprom (EEPROM) error | addr |
-| key859 | measuring wheel error | addr |
-| key861 | left RFID card error | addr |
-| key862 | right RFID card error | addr |
-| key864 | extrude error: buffer full limit not triggered | — |
+| Key | Error |
+|-----|-------|
+| key831 | serial_485 communication timeout |
+| key834 | params error, send data |
+| key835 | extrude error: blocked at connections |
+| key836 | extrude error: blockage between connections and filament sensor |
+| key837 | extrude error: blockage between filament sensor and extrusion gear |
+| key838 | extrude error: through connections but not extruding |
+| key839 | filament error: no filament detected at box extrude position |
+| key840 | box switch state error |
+| key841 | cut error: cut sensor not detected, not rebounded |
+| key843 | RFID error: get rfid failed |
+| key846 | empty printing: box speed < extruder speed |
+| key848 | material error: may be broken at connections |
+| key849 | retrude error: failed to exit connections |
+| key850 | retrude error: multiple connections triggered |
+| key852 | check extruder filament sensor and box sensor state |
+| key853 | humidity sensor error |
+| key854 | filament present when cutting detected |
+| key855 | cut position error |
+| key856 | no cutter |
+| key857 | motor load error |
+| key858 | errprom (EEPROM) error |
+| key859 | measuring wheel error |
+| key861 | left RFID card error |
+| key862 | right RFID card error |
+| key864 | extrude error: buffer full limit not triggered |
 
+---
 
 ## Protocol Consistency
 
-The protocol is consistent across all known CFS hardware:
-- Creality Hi (F018) — primary reference
-- K1 / K1C — same protocol confirmed
-- K2 Plus / K2 Max — same protocol confirmed
+Identical across all known CFS hardware:
+- Creality Hi (F018) — primary reference, fully validated
+- K1 / K1C — protocol confirmed identical
+- K2 Plus / K2 Max — protocol confirmed identical
 
-No version branching (V1/V2) has been observed. The function codes, frame format,
-baud rate, and CRC algorithm are identical across models.
-
----
-
-For implementation details, see `src/creality_cfs.py`.
-For command reference, see `docs/commands.md`.
-For capture setup, see `tools/capture_cfs_traffic.py`.
+No version branching observed. Function codes, frame format, baud rate, and
+CRC algorithm are identical across all models.
 
 ---
 
-## Operational Sequences
-
-### Physical Filament Path
-
-```
-CFS Box (slots 1–4)
-  │
-  [slot N extruder motor]    ← box-side gear, pushes filament forward
-  │
-  [slot filament sensor]     ← detects filament in this slot's path
-  │
-  [4-way splitter/junction]  ← merges 4 paths into 1 Bowden tube
-  │
-  [filament buffer]          ← slack accumulator; fill sensor = BOX_GET_BUFFER_STATE
-  │                            box extruder pauses/resumes based on buffer state
-  [long Bowden tube]
-  │
-  [Nebula extruder]          ← toolhead motor takes over, pulls filament through
-  │
-  [filament cutter]          ← blade with hall sensor; triggered by X-axis motion
-  │                            (toolhead moves to right X-rail limit → lever pushes blade)
-  [hotend]
-```
-
-The box extruder and Nebula extruder run simultaneously during loading — box pushes,
-Nebula pulls. The buffer absorbs the rate difference between them.
-
-The cutter is triggered mechanically by the toolhead reaching the right X-rail limit,
-which presses a lever that pushes the cutter blade. The hall sensor on the blade
-confirms the cut occurred. No filament sensor is at the cutter position.
-
-### Boot Pre-load Sequence
-
-On startup, the CFS checks each slot for filament presence and parks all loaded
-filaments in a known position. Each slot that has filament detected is pre-loaded
-to the toolhead extruder, then retracted to clear the 4-way splitter.
-
-```
-For each slot 1–4:
-
-  1. Query filament sensor state for slot N
-     IF no filament → skip slot
-
-  2. CMD_EXTRUDE_PROCESS (0x10) — feed filament forward
-     Parameters: slot=N, length=full_path_length, velocity=slot_profile
-     Checkpoints verified in order:
-       - slot filament sensor (key836/key837 if blocked)
-       - 4-way splitter passage (key835 if blocked at connection)
-       - buffer fill sensor    (key864 if buffer not filled after extrude)
-       - Nebula extruder input (key838/key839 if not reached)
-
-  3. IF Nebula sensor triggered → pre-load success
-     IF timeout/sensor not triggered → error key835-key839
-
-  4. CMD_RETRUDE_PROCESS (0x11) — retract to park position
-     Parameters: slot=N, length=retract_until_clear_of_splitter
-     Goal: filament tip parked before the 4-way splitter junction
-     Only one path through the splitter is active at a time
-```
-
-The same sequence runs when new filament is inserted into a slot mid-session.
-
-### Tool Change Sequence (T0 → T1 during print)
-
-Confirmed from OrcaSlicer G-code analysis of a 3-color PLA/PETG/PLA print.
-The slicer generates the complete tool change G-code — no BOX_ commands appear
-in the file. The CFS is triggered entirely through the `T0`/`T1`/`T2`/`T3`
-G-code commands, which are caught by macros in `gcode_macro.cfg`.
-
-```
-[SLICER-GENERATED — runs before T1 command]
-  M220 S100                     reset feed rate to 100%
-  G4 S0                         sync point
-  M104 S{next_filament_temp}    PRE-HEAT new filament temp (e.g. S245 for PETG)
-  G4 S0                         sync point
-  G1 E-.8                       retract 0.8mm (prevent ooze during travel)
-  [spiral lift moves]           lift toolhead off print surface
-  G2 Z{z+0.4} I0.86 J0.86 ...  spiral lift (from change_filament_gcode profile)
-  G1 X260 Y180 F30000           MOVE TO CUT POSITION (X260 = right X-rail limit)
-                                 lever at X260 physically presses cutter blade
-  G1 Z{z_after_toolchange} F600 lower to print height
-  M106 S255 / M106 S0           fan pulse (cool filament stub for clean cut)
-
-[T1 COMMAND — intercepted by gcode_macro.cfg on the Hi]
-  T1
-  → CFS macro executes:
-     1. Hall sensor on cutter blade confirms cut (key841 if fails)
-     2. CMD_RETRUDE_PROCESS (0x11)
-        → box motor retracts T0 filament
-        → filament tip clears 4-way splitter, parks in slot tube
-     3. CMD_EXTRUDE_PROCESS (0x10)
-        → slot 1 box motor pushes T1 filament forward
-        → through splitter → buffer → Bowden → Nebula extruder → hotend
-  → Returns to slicer when T1 filament is loaded and ready
-
-[SLICER-GENERATED — runs after T1 returns]
-  M104 S{next_filament_temp}    confirm temperature (from filament_start_gcode)
-  G1 X{wipe_tower} F30000       move to wipe/purge tower position
-  G1 E.8 F2400                  un-retract (prime)
-  [wipe tower extrusion moves]  slicer-calculated purge volume printed as wipe tower
-  ; CP TOOLCHANGE END
-  [resume print]
-```
-
-Key findings from G-code analysis:
-
-- Temperature is managed by the slicer, not the CFS — M104 fires before T1,
-  not as a CFS notification during the change
-- The wipe tower purge is generated entirely by the slicer as G1 extrusion moves —
-  BOX_MATERIAL_CHANGE_FLUSH is likely only used for touchscreen-initiated changes
-- The cut position is X260 (confirmed: right X-rail limit on 260x260 bed)
-- The slicer interface to CFS is only T0/T1/T2/T3 — no BOX_ commands in print G-code
-- PETG uses longer pre-cut retract (filament_retraction_distances_when_cut=18mm)
-  while PLA uses the default (nil = shorter)
-
-### Slicer Filament Parameters (from analyzed G-code)
-
-These are the per-slot values that become CMD_EXTRUDE_PROCESS and CMD_RETRUDE_PROCESS
-parameters. Captured from OrcaSlicer 2.3.2 with Creality Hi profile:
-
-| Parameter | PLA (slots 1,3) | PETG (slot 2) |
-|-----------|----------------|---------------|
-| filament_max_volumetric_speed | **18 mm³/s** | **14 mm³/s** |
-| filament_loading_speed | **28 mm/s** | **28 mm/s** |
-| filament_loading_speed_start | **3 mm/s** | **3 mm/s** |
-| filament_unloading_speed | **90 mm/s** | **90 mm/s** |
-| filament_flow_ratio | 0.98 | 0.95 |
-| retraction_distances_when_cut | nil (short) | **18 mm** |
-| long_retractions_when_cut | 0 | **1 (enabled)** |
-| filament_change_length | 10 mm | 10 mm |
-
-The `filament_max_volumetric_speed` (velocity), `filament_loading_speed`, and
-`filament_unloading_speed` are the likely source of the `velocity` field in
-the CMD_EXTRUDE_PROCESS payload. RS485 capture will confirm encoding.
-
-### Per-Slot Filament Profile
-
-Each slot stores a profile used during extrude/retract operations:
-
-| Parameter | Source | Description |
-|-----------|--------|-------------|
-| `velocity` | Slicer / printer UI | Volumetric flow rate (mm³/s or mm/min) |
-| `temp` | Slicer / printer UI | Hotend target temperature for this filament |
-| `percent` | Slicer | Extrusion multiplier (flow %) |
-| `tnn` | Slot assignment | Slot identifier, e.g. "T1A", "T2B" |
-
-The slicer-provided values override whatever is set on the printer touchscreen.
-The CFS communicates temperature changes to the printer via `M104 S<temp>` during
-tool changes, requiring the Klipper module to handle incoming notifications from the CFS.
-
-### Incoming Notifications (CFS → Printer)
-
-During material change sequences, the CFS sends these commands to the printer host:
-
-| Command | Purpose |
-|---------|---------|
-| `M104 S<temp>` | Change hotend temperature for new filament |
-| `M204 S<accel>` | Adjust acceleration |
-| `SET_TMC_CURRENT STEPPER=stepper_x CURRENT=<A>` | Adjust X stepper current |
-| `SET_GCODE_VARIABLE MACRO=PRINTER_PARAM VARIABLE=hotend_temp VALUE=<temp>` | Store temp in printer params |
-| `G0 E<mm> F74.87` | Extrude filament (printer extruder, ~1.25 mm/s) |
-| `G0 E-<mm> F74.87` | Retract filament (printer extruder) |
-| `G4 P<ms>` | Dwell wait |
-
-These are delivered via the `notifications_addr` / `notifications_cmd` mechanism
-in `serial_485_wrapper.so`. The Klipper module must register response handlers to
-process these and forward them to the appropriate Klipper subsystems (heaters,
-motion system, etc.).
+For implementation: `src/creality_cfs.py`
+For command reference: `docs/commands.md`
+For hardware details: `docs/hardware.md`
+For capture files: `captures/`
