@@ -120,9 +120,10 @@ class TestExtrudeProcess:
         """First call sends INIT sub-command 0x02/0x00."""
         instance = make_cfs_with_mock_send(send_return=None)
         instance.extrude_process(0x01)
-        first_call_data = instance._send_command.call_args_list[0][0][3]
-        assert first_call_data[0] == 0x02
-        assert first_call_data[1] == 0x00  # EXTRUDE_SUB_INIT
+        first_call = instance._send_command.call_args_list[0]
+        data = first_call[1].get('data') if first_call[1] else first_call[0][3]
+        assert data[0] == 0x02
+        assert data[1] == 0x00
 
 
 # ---------------------------------------------------------------------------
@@ -182,8 +183,10 @@ class TestRetrudeProcess:
         instance.retrude_process(0x01)
         assert instance._send_command.call_count == 1
 
-    def test_extrude_and_retrude_use_different_command_codes(self):
-        """0x10 and 0x11 are distinct command codes."""
-        assert CMD_EXTRUDE_PROCESS != CMD_RETRUDE_PROCESS
-        assert CMD_EXTRUDE_PROCESS == 0x10
-        assert CMD_RETRUDE_PROCESS == 0x11
+    def test_retrude_process_sends_correct_payload(self):
+        """Payload is [0x02, 0x01] as confirmed from live capture."""
+        instance = make_cfs_with_mock_send(send_return=None)
+        instance.retrude_process(0x01)
+        call = instance._send_command.call_args
+        data = call[1].get('data') if call[1] else call[0][3]
+        assert data == bytes([0x02, 0x01])
