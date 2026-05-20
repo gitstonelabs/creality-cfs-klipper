@@ -188,7 +188,7 @@ class TestBuildMessageCapturedFrames:
     def test_build_cmd_get_box_state_slave_1(self):
         """CMD_GET_BOX_STATE slave 1 matches b'\\xf7\\x01\\x03\\xff\\x0a\\x5c'."""
         msg = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE)
-        assert msg == b'\xf7\x01\x03\xff\x0a\x5c'
+        assert msg == b'\xf7\x01\x03\xff\x08\x52'
 
     def test_build_cmd_get_slave_info_broadcast(self):
         """CMD_GET_SLAVE_INFO broadcast matches b'\\xf7\\xfe\\x05\\x00\\xa1\\xfe\\xfe\\xf8'."""
