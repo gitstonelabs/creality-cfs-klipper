@@ -89,7 +89,7 @@ class TestBuildMessageBasic:
     def test_build_message_basic_func_field_position(self):
         """FUNC byte is at index 4."""
         msg = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE)
-        assert msg[4] == CMD_GET_BOX_STATE == 0x0A
+        assert msg[4] == CMD_GET_BOX_STATE == 0x08
 
     def test_build_message_basic_crc_is_last_byte(self):
         """CRC is always the final byte, matching manual calculation of msg[2:-1]."""

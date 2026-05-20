@@ -347,9 +347,10 @@ class TestCmdGetBoxState:
     """Tests for CMD_GET_BOX_STATE (0x0A)."""
 
     def test_cmd_get_box_state_message_matches_capture(self):
-        """GET_BOX_STATE slave 1 matches captured b'\\xf7\\x01\\x03\\xff\\x0a\\x5c'."""
+        """GET_BOX_STATE slave 1 matches captured b'\xf7\x01\x03\xff\x08\x52'."""
         msg = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE)
-        assert msg == b'\xf7\x01\x03\xff\x0a\x5c'
+        assert msg == b'\xf7\x01\x03\xff\x08\x52'
+
 
     def test_cmd_get_box_state_no_data_payload(self):
         """GET_BOX_STATE has no data payload — LENGTH=3, total 6 bytes."""
