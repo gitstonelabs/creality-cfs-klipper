@@ -1,164 +1,189 @@
 """
-test_stubs.py — Tests for stubbed commands CMD_EXTRUDE_PROCESS (0x10) and
-CMD_RETRUDE_PROCESS (0x11) in CrealityCFS.
+tests/test_stubs.py
 
-These commands raise NotImplementedError because their payload format is locked
-inside the Creality binary firmware (.so) and could not be recovered during
-reverse engineering.
-
-Tests verify:
-  1. NotImplementedError is raised
-  2. The error message includes the command code (0x10 / 0x11)
-  3. The error message includes actionable guidance about RS485 capture
-
-The tests do NOT require a live serial connection — the stub raises before
-any I/O is attempted.
+Tests for previously-stubbed commands that are now fully implemented
+in v1.1.0. These tests validate the real implementations rather than
+checking for NotImplementedError.
 """
 
-import sys
-import os
-
 import pytest
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-
-from creality_cfs import CrealityCFS
+from unittest.mock import MagicMock, patch
+from src.creality_cfs import CrealityCFS, CMD_EXTRUDE_PROCESS, CMD_RETRUDE_PROCESS
 
 
 # ---------------------------------------------------------------------------
-# Helper: fake instance that bypasses __init__
+# Helpers
 # ---------------------------------------------------------------------------
 
-class _FakeCFS:
-    """Minimal stub instance to bind unbound methods for testing stubs."""
-    pass
+def make_cfs_with_mock_send(send_return=None):
+    """Create a CrealityCFS instance with _send_command mocked out."""
+    instance = object.__new__(CrealityCFS)
+    instance._send_command = MagicMock(return_value=send_return)
+    instance.is_connected = True
+    return instance
 
 
-# ===========================================================================
-# CMD_EXTRUDE_PROCESS (0x10)
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# CMD_EXTRUDE_PROCESS (0x10) — real implementation tests
+# ---------------------------------------------------------------------------
 
-class TestExtrudeProcessStub:
-    """Tests for CrealityCFS.extrude_process() (CMD_EXTRUDE_PROCESS, 0x10)."""
+class TestExtrudeProcess:
 
-    def test_extrude_process_raises_not_implemented_error(self):
-        """extrude_process() always raises NotImplementedError.
+    def test_extrude_process_returns_dict(self):
+        """extrude_process() returns a dict with expected keys."""
+        # Mock: INIT returns ok, POLL returns ACK, STREAM returns no response
+        def side_effect(addr, status, cmd, data, **kwargs):
+            sub = data[1] if len(data) > 1 else 0
+            if sub == 0x00:  # INIT
+                return {"data": bytes([0x00])}
+            return None  # POLL and STREAM timeout
 
-        The payload format for 0x10 is locked in the Creality .so binary.
-        Calling this method must fail loudly rather than sending garbage bytes
-        that could corrupt the RS485 bus.
-        """
-        instance = _FakeCFS()
-        with pytest.raises(NotImplementedError):
-            CrealityCFS.extrude_process(instance, 0x01)
+        instance = make_cfs_with_mock_send()
+        instance._send_command.side_effect = side_effect
 
-    def test_extrude_process_error_message_contains_0x10_command_code(self):
-        """extrude_process() error message references command code 0x10."""
-        instance = _FakeCFS()
-        with pytest.raises(NotImplementedError) as exc_info:
-            CrealityCFS.extrude_process(instance, 0x01)
-        assert "0x10" in str(exc_info.value), (
-            f"Error message should reference 0x10, got: {exc_info.value}"
-        )
+        result = instance.extrude_process(0x01)
 
-    def test_extrude_process_error_message_contains_capture_guidance(self):
-        """extrude_process() error message contains actionable capture guidance.
+        assert isinstance(result, dict)
+        assert "init_ok" in result
+        assert "final_pos" in result
+        assert "final_state" in result
+        assert "polls" in result
 
-        The engineer reading this error should be told how to obtain the
-        payload format (capture RS485 during tool-change).
-        """
-        instance = _FakeCFS()
-        with pytest.raises(NotImplementedError) as exc_info:
-            CrealityCFS.extrude_process(instance, 0x01)
-        msg = str(exc_info.value).lower()
-        # Should mention RS485 capture or tool-change
-        assert any(kw in msg for kw in ["rs485", "capture", "payload", "tool"]), (
-            f"Error message lacks capture guidance: {exc_info.value}"
-        )
+    def test_extrude_process_init_ok_true_on_success(self):
+        """init_ok=True when INIT sub-command returns status 0x00."""
+        def side_effect(addr, status, cmd, data, **kwargs):
+            if data[1] == 0x00:
+                return {"data": bytes([0x00])}
+            return None
 
-    def test_extrude_process_raises_regardless_of_addr_argument(self):
-        """extrude_process() raises NotImplementedError for any addr value."""
-        instance = _FakeCFS()
-        for addr in [0x00, 0x01, 0x04, 0xFF]:
-            with pytest.raises(NotImplementedError):
-                CrealityCFS.extrude_process(instance, addr)
+        instance = make_cfs_with_mock_send()
+        instance._send_command.side_effect = side_effect
 
-    def test_extrude_process_raises_regardless_of_extra_kwargs(self):
-        """extrude_process() raises NotImplementedError even with extra kwargs."""
-        instance = _FakeCFS()
-        with pytest.raises(NotImplementedError):
-            CrealityCFS.extrude_process(instance, 0x01, extra_param=42)
+        result = instance.extrude_process(0x01)
+        assert result["init_ok"] is True
+
+    def test_extrude_process_init_ok_false_on_no_response(self):
+        """init_ok=False when INIT sub-command returns no response."""
+        instance = make_cfs_with_mock_send(send_return=None)
+        result = instance.extrude_process(0x01)
+        assert result["init_ok"] is False
+
+    def test_extrude_process_polls_stream_and_reports_position(self):
+        """STREAM sub-command responses are decoded into final_pos."""
+        call_count = [0]
+
+        def side_effect(addr, status, cmd, data, **kwargs):
+            sub = data[1] if len(data) > 1 else 0
+            if sub == 0x00:  # INIT
+                return {"data": bytes([0x00])}
+            if sub == 0x04:  # POLL
+                return {"data": b""}
+            if sub == 0x05:  # STREAM
+                call_count[0] += 1
+                # pos = 40000 = 400.00mm, state = 0xC4 (SPEED)
+                return {"data": bytes([0xC4, 0x9C, 0x40])}
+            return None
+
+        instance = make_cfs_with_mock_send()
+        instance._send_command.side_effect = side_effect
+
+        result = instance.extrude_process(0x01)
+        assert result["final_pos"] == pytest.approx(400.00, abs=1.0)
+        assert result["final_state"] == 0xC4
+        assert result["polls"] > 0
+
+    def test_extrude_process_invalid_addr_raises_value_error(self):
+        """Out-of-range address raises ValueError."""
+        instance = make_cfs_with_mock_send()
+        with pytest.raises(ValueError):
+            instance.extrude_process(0x00)
+        with pytest.raises(ValueError):
+            instance.extrude_process(0x05)
+
+    def test_extrude_process_valid_addrs_accepted(self):
+        """Addresses 0x01-0x04 are accepted without ValueError."""
+        instance = make_cfs_with_mock_send(send_return=None)
+        for addr in [0x01, 0x02, 0x03, 0x04]:
+            # Should not raise — returns dict even with no serial response
+            result = instance.extrude_process(addr)
+            assert isinstance(result, dict)
+
+    def test_extrude_process_uses_correct_command_code(self):
+        """_send_command is called with CMD_EXTRUDE_PROCESS (0x10)."""
+        instance = make_cfs_with_mock_send(send_return=None)
+        instance.extrude_process(0x01)
+        calls = instance._send_command.call_args_list
+        cmd_codes = [c[0][2] for c in calls]  # positional arg index 2 = func
+        assert CMD_EXTRUDE_PROCESS in cmd_codes
+
+    def test_extrude_process_sends_init_subcommand(self):
+        """First call sends INIT sub-command 0x02/0x00."""
+        instance = make_cfs_with_mock_send(send_return=None)
+        instance.extrude_process(0x01)
+        first_call_data = instance._send_command.call_args_list[0][0][3]
+        assert first_call_data[0] == 0x02
+        assert first_call_data[1] == 0x00  # EXTRUDE_SUB_INIT
 
 
-# ===========================================================================
-# CMD_RETRUDE_PROCESS (0x11)
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# CMD_RETRUDE_PROCESS (0x11) — real implementation tests
+# ---------------------------------------------------------------------------
 
-class TestRetrudeProcessStub:
-    """Tests for CrealityCFS.retrude_process() (CMD_RETRUDE_PROCESS, 0x11)."""
+class TestRetrudeProcess:
 
-    def test_retrude_process_raises_not_implemented_error(self):
-        """retrude_process() always raises NotImplementedError.
+    def test_retrude_process_returns_bool(self):
+        """retrude_process() returns a bool."""
+        instance = make_cfs_with_mock_send(send_return={"data": b""})
+        result = instance.retrude_process(0x01)
+        assert isinstance(result, bool)
 
-        Same limitation as extrude_process() — payload unknown.
-        """
-        instance = _FakeCFS()
-        with pytest.raises(NotImplementedError):
-            CrealityCFS.retrude_process(instance, 0x01)
+    def test_retrude_process_returns_true_on_ack(self):
+        """Returns True when CFS acknowledges the retract command."""
+        instance = make_cfs_with_mock_send(send_return={"data": b""})
+        assert instance.retrude_process(0x01) is True
 
-    def test_retrude_process_error_message_contains_0x11_command_code(self):
-        """retrude_process() error message references command code 0x11."""
-        instance = _FakeCFS()
-        with pytest.raises(NotImplementedError) as exc_info:
-            CrealityCFS.retrude_process(instance, 0x01)
-        assert "0x11" in str(exc_info.value), (
-            f"Error message should reference 0x11, got: {exc_info.value}"
-        )
+    def test_retrude_process_returns_false_on_no_response(self):
+        """Returns False when no response received."""
+        instance = make_cfs_with_mock_send(send_return=None)
+        assert instance.retrude_process(0x01) is False
 
-    def test_retrude_process_error_message_contains_capture_guidance(self):
-        """retrude_process() error message contains actionable capture guidance."""
-        instance = _FakeCFS()
-        with pytest.raises(NotImplementedError) as exc_info:
-            CrealityCFS.retrude_process(instance, 0x01)
-        msg = str(exc_info.value).lower()
-        assert any(kw in msg for kw in ["rs485", "capture", "payload", "tool"]), (
-            f"Error message lacks capture guidance: {exc_info.value}"
-        )
+    def test_retrude_process_invalid_addr_raises_value_error(self):
+        """Out-of-range address raises ValueError."""
+        instance = make_cfs_with_mock_send()
+        with pytest.raises(ValueError):
+            instance.retrude_process(0x00)
+        with pytest.raises(ValueError):
+            instance.retrude_process(0x05)
 
-    def test_retrude_process_raises_regardless_of_addr_argument(self):
-        """retrude_process() raises NotImplementedError for any addr value."""
-        instance = _FakeCFS()
-        for addr in [0x00, 0x01, 0x04, 0xFF]:
-            with pytest.raises(NotImplementedError):
-                CrealityCFS.retrude_process(instance, addr)
+    def test_retrude_process_valid_addrs_accepted(self):
+        """Addresses 0x01-0x04 are accepted without ValueError."""
+        instance = make_cfs_with_mock_send(send_return=None)
+        for addr in [0x01, 0x02, 0x03, 0x04]:
+            result = instance.retrude_process(addr)
+            assert isinstance(result, bool)
 
-    def test_retrude_process_raises_regardless_of_extra_args(self):
-        """retrude_process() raises NotImplementedError even with positional args."""
-        instance = _FakeCFS()
-        with pytest.raises(NotImplementedError):
-            CrealityCFS.retrude_process(instance, 0x01, b'\x01\x02', extra=True)
+    def test_retrude_process_uses_correct_command_code(self):
+        """_send_command is called with CMD_RETRUDE_PROCESS (0x11)."""
+        instance = make_cfs_with_mock_send(send_return=None)
+        instance.retrude_process(0x01)
+        cmd_code = instance._send_command.call_args[0][2]
+        assert cmd_code == CMD_RETRUDE_PROCESS
 
-    def test_extrude_and_retrude_are_distinct_stubs_with_different_error_messages(self):
-        """extrude_process and retrude_process have separate, distinct error messages.
+    def test_retrude_process_sends_correct_payload(self):
+        """Payload is [0x02, 0x01] as confirmed from live capture."""
+        instance = make_cfs_with_mock_send(send_return=None)
+        instance.retrude_process(0x01)
+        data = instance._send_command.call_args[0][3]
+        assert data == bytes([0x02, 0x01])
 
-        Both stubs must clearly identify WHICH command is unimplemented, so an
-        engineer debugging a crash log can distinguish them without context.
-        """
-        instance = _FakeCFS()
-        try:
-            CrealityCFS.extrude_process(instance, 0x01)
-        except NotImplementedError as e:
-            extrude_msg = str(e)
+    def test_retrude_process_is_single_command(self):
+        """Retrude is one-shot — only one _send_command call."""
+        instance = make_cfs_with_mock_send(send_return=None)
+        instance.retrude_process(0x01)
+        assert instance._send_command.call_count == 1
 
-        try:
-            CrealityCFS.retrude_process(instance, 0x01)
-        except NotImplementedError as e:
-            retrude_msg = str(e)
-
-        # They must not be identical strings
-        assert extrude_msg != retrude_msg, (
-            "extrude_process and retrude_process should have distinct error messages"
-        )
-        # Each must identify its own command code
-        assert "0x10" in extrude_msg
-        assert "0x11" in retrude_msg
+    def test_extrude_and_retrude_use_different_command_codes(self):
+        """0x10 and 0x11 are distinct command codes."""
+        assert CMD_EXTRUDE_PROCESS != CMD_RETRUDE_PROCESS
+        assert CMD_EXTRUDE_PROCESS == 0x10
+        assert CMD_RETRUDE_PROCESS == 0x11
