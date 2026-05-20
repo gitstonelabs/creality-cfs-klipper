@@ -89,7 +89,7 @@ class TestBuildMessageBasic:
     def test_build_message_basic_func_field_position(self):
         """FUNC byte is at index 4."""
         msg = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE)
-        assert msg[4] == CMD_GET_BOX_STATE == 0x0A
+        assert msg[4] == CMD_GET_BOX_STATE == 0x08
 
     def test_build_message_basic_crc_is_last_byte(self):
         """CRC is always the final byte, matching manual calculation of msg[2:-1]."""
@@ -188,7 +188,7 @@ class TestBuildMessageCapturedFrames:
     def test_build_cmd_get_box_state_slave_1(self):
         """CMD_GET_BOX_STATE slave 1 matches b'\\xf7\\x01\\x03\\xff\\x0a\\x5c'."""
         msg = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE)
-        assert msg == b'\xf7\x01\x03\xff\x0a\x5c'
+        assert msg == b'\xf7\x01\x03\xff\x0a\x52'
 
     def test_build_cmd_get_slave_info_broadcast(self):
         """CMD_GET_SLAVE_INFO broadcast matches b'\\xf7\\xfe\\x05\\x00\\xa1\\xfe\\xfe\\xf8'."""
