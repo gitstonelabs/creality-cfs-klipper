@@ -1,8 +1,10 @@
 # Creality Filament System (CFS) — Klipper Integration Installation Guide
 
-**Module version:** 1.0.0
-**Protocol confidence:** 93–97% 
+**Module version:** 1.1.0 (beta)
+**Protocol confidence:** all commands confirmed against live RS485 capture
 **Klipper compatibility:** v0.11.0+
+
+> For a visually-illustrated quickstart with wiring diagrams, see [`INSTALL.md`](../INSTALL.md) at the repo root.
 
 ---
 
@@ -163,8 +165,11 @@ This prints all address slots, their UniIDs, online state, and mode.
 | `CFS_INIT` | — | Run full 5-step auto-addressing sequence |
 | `CFS_STATUS` | `[BOX=1-4]` | Query GET_BOX_STATE; omit BOX for all boxes |
 | `CFS_VERSION` | `[BOX=1-4]` | Query GET_VERSION_SN; omit BOX for all boxes |
+| `CFS_FW_VERSION` | `BOX=1-4` | Query 0xF0 firmware version string |
 | `CFS_SET_MODE` | `BOX=1-4 MODE=0-255 [PARAM=0-255]` | Set box operating mode |
 | `CFS_SET_PRELOAD` | `BOX=1-4 MASK=0-255 ENABLE=0\|1` | Configure pre-loading slots |
+| `CFS_EXTRUDE` | `BOX=1-4` | Load filament from CFS to toolhead (streams position feedback) |
+| `CFS_RETRUDE` | `BOX=1-4` | Retract filament back into CFS box |
 | `CFS_ADDR_TABLE` | — | Print current address assignment table |
 
 ### Macro commands (from cfs_macros.cfg)
@@ -175,28 +180,22 @@ This prints all address slots, their UniIDs, online state, and mode.
 | `CFS_CHECK_STATUS` | Query all box states with logging |
 | `CFS_GET_VERSIONS` | Query all box versions with logging |
 | `CFS_PRINT_START` | Pre-print: initialize + check status |
-| `CFS_PRINT_END` | Post-print cleanup (placeholder until 0x11 is known) |
+| `CFS_PRINT_END` | Post-print: retract filament from all boxes |
 | `CFS_ENABLE_PRELOAD` | Enable pre-loading on all boxes, all slots |
 | `CFS_DISABLE_PRELOAD` | Disable pre-loading on all boxes, all slots |
+| `T0` / `T1` / `T2` / `T3` | Tool-change to box 1 / 2 / 3 / 4 (auto-retracts previous tool) |
 
 ---
 
 ## 6. Known Limitations
 
-### Tool-change macros (T0–T3) not available
+### Streaming poll count is fixed (`EXTRUDE_POLL_MAX=8`)
 
-The filament load and retract commands are not implemented:
+`CFS_EXTRUDE` currently polls the position-feedback stream a fixed 8 times. In production the Creality host polls until position stabilizes (~398–400 mm). A future module version should poll until `delta < EXTRUDE_SETTLE_THRESHOLD` for N consecutive reads. For 99 % of cases the fixed count is sufficient because the filament path is short.
 
-- `CMD_EXTRUDE_PROCESS` (0x10) — payload unknown
-- `CMD_RETRUDE_PROCESS` (0x11) — payload unknown
+### Half-duplex RS485 direction switching
 
-These commands are used by the Creality host software to push and retract filament during tool changes. Their payload format is locked inside a Creality proprietary `.so` binary that was not available for reverse engineering.
-
-**Impact:** You cannot trigger automatic filament changes from Klipper macros until these commands are unlocked. All other CFS functions (status, version, addressing, mode setting) work normally.
-
-### Single-direction RS485
-
-The module does not manually toggle RTS for RS485 direction switching. This is intentional — Creality hardware uses kernel-managed or hardware auto-direction adapters. If you are using a third-party RS485 adapter that requires manual RTS toggling, you will need to modify `_connect_serial()` to enable `serial.rs485.RS485Settings()`.
+The module does not manually toggle RTS — Creality's RS485 hardware (and CH341 USB-RS485 dongles) handle direction switching automatically. If you're using a third-party adapter that requires manual RTS control, you'll need to modify `_connect_serial()` to enable `serial.rs485.RS485Settings()`.
 
 ### Broadcast discovery may miss boxes
 
@@ -204,39 +203,38 @@ The discovery step sends one `CMD_GET_SLAVE_INFO` broadcast per expected box slo
 
 ---
 
-## 7. Unlocking 0x10/0x11 (EXTRUDE/RETRUDE)
+## 7. Capturing new commands (for future protocol work)
 
-To recover the payload format for the stubbed commands, capture RS485 traffic while the Creality host software performs a filament change:
+`0x10 EXTRUDE_PROCESS` and `0x11 RETRUDE_PROCESS` are now fully implemented in v1.1.0. If you discover additional undocumented function codes during operation, capture them with the tools below and open an issue.
 
 ### Method 1: interceptty (software)
 
 ```bash
-# Install interceptty
 sudo apt-get install interceptty
 
 # Intercept the serial port (replace /dev/ttyS5 with your port)
 sudo interceptty -s 'ispeed 230400 ospeed 230400' /dev/ttyS5 /dev/ttyS5_tap &
 
-# Start the Creality host and trigger a T0-T3 tool-change
-# Captured bytes will be logged to stdout
-
-# Format: each line is hex bytes of one frame
-# Look for frames with function code 0x10 or 0x11
+# Trigger the Creality host action you want to capture.
+# Captured bytes are logged to stdout as hex.
 ```
 
 ### Method 2: Logic analyzer
 
-1. Connect a logic analyzer (e.g., Saleae, PulseView-compatible) to the RS485 A/B lines.
+1. Connect a logic analyzer (Saleae, PulseView-compatible) to the RS485 A/B lines.
 2. Configure for 230400 baud, 8N1, with RS485 framing.
-3. Trigger a T0-T3 tool change on the Creality K-Ware software.
-4. Capture and decode all frames. Look for frames where byte[4] == 0x10 or 0x11.
+3. Trigger the operation on the Creality K-Ware software.
+4. Decode all frames and inspect the function-code byte (byte 4).
+
+### Method 3: bundled sniffer script
+
+```bash
+python3 tools/capture_cfs_traffic.py --port /dev/ttyS5 --out capture.bin
+```
 
 ### Reporting findings
 
-Once you have captured frames with 0x10 or 0x11 in the function code position, open an issue or pull request with:
-- The raw hex bytes of the full captured message
-- The tool-change operation that triggered it (which slot, load or retract)
-- The CFS box model and firmware version from `CFS_VERSION`
+Attach the raw hex bytes, what operation triggered them, and the CFS firmware version from `CFS_FW_VERSION`.
 
 ---
 

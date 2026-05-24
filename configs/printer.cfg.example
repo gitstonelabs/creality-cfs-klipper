@@ -2,65 +2,94 @@
 # Creality Filament System (CFS) — printer.cfg configuration example
 # =============================================================================
 #
-# Protocol: CFS RS485 v1 (single version)
-# Baud rate: 230400 validated by captured traffic
-# CRC: CRC-8/SMBUS (poly=0x07, init=0x00) validated (16/16 vectors)
+# Protocol: CFS RS485 v1 (validated on Creality Hi, K1, K1C, K2 Plus, K2 Max)
+# Baud rate: 230400 (validated by captured traffic; do not change)
+# CRC: CRC-8/SMBUS (poly=0x07, init=0x00) validated against 16/16 vectors
 #
-# REQUIRED: Copy creality_cfs.py to ~/klipper/klippy/extras/creality_cfs.py
-#           Then restart Klipper and verify module loads in klippy.log.
+# Two-step install:
+#   1. Copy creality_cfs.py to ~/klipper/klippy/extras/creality_cfs.py
+#   2. Add the [creality_cfs] block below to your printer.cfg
 #
-# After configuration, test with:
-#   CFS_INIT           -> run auto-addressing (discover all boxes)
-#   CFS_VERSION        -> print firmware version from each box
-#   CFS_STATUS         -> print operating state of each box
+# Then restart Klipper and verify the module loaded:
+#   grep creality_cfs /var/log/klipper/klippy.log
+# Expected: "creality_cfs: module loaded, port=... baud=230400"
+#
+# First-boot test:
+#   CFS_INIT           -- run auto-addressing (discover all boxes)
+#   CFS_VERSION        -- print firmware version from each box
+#   CFS_STATUS         -- print operating state of each box
+#
+# Full installation guide with wiring diagrams: see INSTALL.md
 # =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Choose ONE of the [creality_cfs] blocks below depending on your setup.
+# -----------------------------------------------------------------------------
+
+
+# ---- Option A: Creality printer onboard RS485 (Hi / K1 / K2 family) ---------
+# Use this on Creality printers where the CFS connects to the printer's
+# mainboard RS485 port (typically UART5 = /dev/ttyS5).
 
 [creality_cfs]
-
 serial_port: /dev/ttyS5
 #   RS485 serial port connected to the CFS hub.
-#   validated default: /dev/ttyS5
-#   Common alternatives: /dev/ttyUSB0, /dev/ttyAMA0
-#   On Creality K2 Plus boards the port is typically /dev/ttyS5.
+#   Validated: Creality Hi (UART5), K1/K1C (UART5), K2 Plus/K2 Max (UART5).
+#   Other Allwinner-based Klipper hosts may also expose this as /dev/ttyS5.
 
 baud: 230400
-#   Serial baud rate in bits per second.
-#   Default: 230400 — validated by captured traffic.
-#   Do not change unless you have hardware evidence of a different rate.
+#   Serial baud rate. Validated by captured traffic. Do not change.
 
 timeout: 0.1
-#   Default command timeout in seconds for operational commands (GET_BOX_STATE,
-#   GET_VERSION_SN, SET_BOX_MODE, SET_PRE_LOADING).
-#   Note: The auto-addressing discovery step (CMD_GET_SLAVE_INFO) always uses
-#   a 1.0 second timeout regardless of this setting, as boxes may respond slowly.
-#   Default: 0.1
+#   Default command timeout in seconds for operational commands.
+#   Note: auto-addressing discovery (CMD_GET_SLAVE_INFO) always uses 1.0 s.
 
 retry_count: 3
-#   Number of retry attempts for failed commands before giving up.
-#   Each retry re-sends the full message and waits for a fresh response.
-#   Addressing commands (auto-init) use 1 retry regardless of this setting.
-#   Default: 3
+#   Retry attempts for failed (no-response or CRC-error) commands.
+#   Addressing commands use 1 retry regardless.
 
 box_count: 4
-#   Number of CFS boxes expected to be present (1-4).
-#   The auto-addressing sequence will attempt to discover this many boxes.
-#   If fewer boxes are physically connected, the module will log a warning
-#   but continue normally with the boxes that did respond.
-#   Default: 4
+#   Number of CFS boxes (1-4) expected in the daisy chain.
+#   If fewer are present, init logs a warning and continues with what responded.
 
 auto_init: True
-#   If True, automatically run the auto-addressing sequence when Klipper
-#   transitions to the ready state. Set to False if you want to run
-#   CFS_INIT manually (e.g., after a tool-change or power cycle of the CFS).
-#   Default: True
+#   Run CFS_INIT automatically on klippy:ready.
+#   Set False if you want to control timing manually.
 
 
-# =============================================================================
-# OPTIONAL: Include CFS macros
-# =============================================================================
-# Add this line anywhere in your printer.cfg to load the CFS macros:
+# ---- Option B: USB-RS485 adapter (non-Creality printer or USB host) --------
+# Comment out Option A above and uncomment this block to use a USB-RS485
+# dongle (CH341 confirmed; FTDI also works). Recommended for Raspberry Pi,
+# Jetson, BTT CB1/CB2 hosts, or anyone running mainline Klipper.
+#
+# Find your adapter's stable path with:  ls /dev/serial/by-id/
+#
+# [creality_cfs]
+# serial_port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_*-if00
+# baud: 230400
+# box_count: 1
+# auto_init: True
+
+
+# -----------------------------------------------------------------------------
+# Optional: Include CFS macros (T0/T1/T2/T3, CFS_PRINT_START, etc.)
+# -----------------------------------------------------------------------------
+# Add this line anywhere in printer.cfg to load the bundled macros:
 #
 #   [include cfs_macros.cfg]
 #
-# Ensure cfs_macros.cfg is in the same directory as printer.cfg, or provide
-# an absolute path.
+# Place cfs_macros.cfg in the same directory as printer.cfg.
+
+
+# -----------------------------------------------------------------------------
+# Optional: Buffer-empty filament-runout sensor
+# -----------------------------------------------------------------------------
+# The CFS exposes a mechanical switch on connector pin 2 that closes when
+# the buffer tube runs empty. Wire it to a pulled-up GPIO and uncomment:
+#
+# [filament_switch_sensor cfs_buffer]
+# switch_pin: ^EBB:PA2     # replace with your actual GPIO pin
+# pause_on_runout: false   # set True if you want auto-pause on empty
+# runout_gcode:
+#     RESPOND MSG="CFS buffer empty — load filament or pause"
