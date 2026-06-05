@@ -1,7 +1,7 @@
 # CFS RS485 Protocol Specification
 
 Protocol reverse-engineered from:
-- `CrealityOfficial/Hi_Klipper` — `auto_addr_wrapper.py` (full Python source, GPL-3.0)
+- `CrealityOfficial/Hi_Klipper`: `auto_addr_wrapper.py` (full Python source, GPL-3.0)
 - `strings` analysis of `box_wrapper.cpython-39.so` and `serial_485_wrapper.cpython-39.so`
 - Live RS485 traffic captures during T0→T1→T2→T3 tool changes on Creality Hi
 - Cross-referenced with `ityshchenko/klipper-cfs` and `fake-name/cfs-reverse-engineering`
@@ -32,28 +32,28 @@ top row pins 1-3, bottom row pins 4-6):
 
 | Pin | Wire | Idle Voltage | Triggered | Function |
 |-----|------|-------------|-----------|----------|
-| 1 | Red | ~1.75V | — | RS485-A |
+| 1 | Red | ~1.75V | n/a | RS485-A |
 | 2 | White | 0.01V | 3.3V | Buffer switch 1 (GPIO, not RS485) |
 | 3 | Black | 3.3V | 0.01V | Buffer switch 2 (inverted pair of pin 2) |
-| 4 | Yellow | 24V | — | 24V power |
-| 5 | Green | 0V | — | GND |
-| 6 | Blue | ~1.74V | — | RS485-B |
+| 4 | Yellow | 24V | n/a | 24V power |
+| 5 | Green | 0V | n/a | GND |
+| 6 | Blue | ~1.74V | n/a | RS485-B |
 
 **Important:** Pins 2 and 3 are direct GPIO buffer switch signals, NOT RS485 data.
-No RS485 traffic is generated when the buffer triggers — these are hardware lines
+No RS485 traffic is generated when the buffer triggers; these are hardware lines
 read directly by the printer as GPIO inputs.
 
 **Daisy-chain topology:**
 ```
 Printer (1x 6-pin OUT)
-  → CFS1 port1 (IN) — CFS1 port2 (OUT)
-  → CFS2 port1 (IN) — CFS2 port2 (OUT)
-  → CFS3 port1 (IN) — CFS3 port2 (OUT)
-  → CFS4 port1 (IN) — CFS4 port2 (OUT)
+  → CFS1 port1 (IN) / CFS1 port2 (OUT)
+  → CFS2 port1 (IN) / CFS2 port2 (OUT)
+  → CFS3 port1 (IN) / CFS3 port2 (OUT)
+  → CFS4 port1 (IN) / CFS4 port2 (OUT)
   → Filament buffer (terminator, 1x 6-pin IN)
 ```
 
-Buffer switch signals are per-segment — pin 2/3 on the Printer→CFS1 link carry
+Buffer switch signals are per-segment. Pin 2/3 on the Printer→CFS1 link carry
 CFS1's buffer state only. Each segment has its own independent buffer signals.
 
 ---
@@ -80,14 +80,14 @@ Every RS485 message follows this structure:
 **Note on short frames:** Some responses (e.g. CMD_GET_BOX_STATE) use a 6-byte
 frame with no separate DATA field. In these frames the state value occupies the
 final byte position and there is no CRC. This was confirmed by computing expected
-CRC values against observed bytes — they do not match, confirming the last byte
+CRC values against observed bytes: they do not match, confirming the last byte
 is data, not CRC.
 
 ---
 
 ## CRC Algorithm
 
-**Type:** CRC-8/SMBUS — confirmed from `auto_addr_wrapper.py` source and validated
+**Type:** CRC-8/SMBUS, confirmed from `auto_addr_wrapper.py` source and validated
 against 16 live capture test vectors.
 
 - Polynomial: `0x07`
@@ -164,7 +164,7 @@ Three consecutive failures mark a box offline.
 
 **Note:** If a CFS box already has an address stored from a previous session, it
 responds to `CMD_ONLINE_CHECK (0xA2)` but not to the `CMD_GET_SLAVE_INFO (0xA1)`
-broadcast. This is expected behavior — the box considers itself already addressed.
+broadcast. This is expected behavior; the box considers itself already addressed.
 
 ---
 
@@ -196,9 +196,9 @@ broadcast. This is expected behavior — the box considers itself already addres
 
 ---
 
-## CMD_GET_BOX_STATE (0x08) — Confirmed
+## CMD_GET_BOX_STATE (0x08): Confirmed
 
-**Corrected in v1.1.0** — was incorrectly documented as 0x0A (which is LOADER_TO_APP).
+**Corrected in v1.1.0**: was incorrectly documented as 0x0A (which is LOADER_TO_APP).
 
 ```
 REQ: f7 [addr] 04 ff 08 [param]
@@ -212,16 +212,16 @@ state: 0x0F = IDLE    (standby, normal polling response)
        0x02 = ACTIVE  (active during retract sequence)
 ```
 
-The response last byte is the state value — no CRC on short frames (confirmed
+The response last byte is the state value, no CRC on short frames (confirmed
 by computing expected CRC: does not match observed value).
 
 ---
 
-## CMD_EXTRUDE_PROCESS (0x10) — Confirmed from capture
+## CMD_EXTRUDE_PROCESS (0x10): Confirmed from capture
 
 Three sub-commands sent in sequence per tool change:
 
-### Sub-command 0x02/0x00 — Init/start
+### Sub-command 0x02/0x00: Init/start
 
 ```
 REQ: f7 01 06 ff 10 02 00 00 [crc]
@@ -230,7 +230,7 @@ RSP: f7 01 04 00 10 00 [crc]    ← 1-byte response: 0x00 = success
 
 Sent once to start the extrusion motor.
 
-### Sub-command 0x02/0x04 — Status poll
+### Sub-command 0x02/0x04: Status poll
 
 ```
 REQ: f7 01 06 ff 10 02 04 00 [crc]
@@ -239,7 +239,7 @@ RSP: f7 01 03 00 10 [crc]       ← ACK only, no payload
 
 Sent periodically during extrusion to check status.
 
-### Sub-command 0x02/0x05 — Streaming position feedback
+### Sub-command 0x02/0x05: Streaming position feedback
 
 ```
 REQ: f7 01 06 ff 10 02 05 00 [crc]
@@ -255,7 +255,7 @@ Position profile observed across multiple tool changes:
 state=0xC3  pos≈588mm  (wrap-around during acceleration, not valid)
 state=0xC4  pos≈149mm  (filament moving, just started)
 state=0xC4  pos≈338mm  (filament mid-path through buffer)
-state=0xC4  pos≈400mm  (filament arrived at toolhead sensor — stable)
+state=0xC4  pos≈400mm  (filament arrived at toolhead sensor, stable)
 ```
 
 Filament path length confirmed: **~398-400mm** from CFS motor to toolhead sensor.
@@ -279,7 +279,7 @@ EXTRUDE 0x02/0x00      start next load cycle (purge)
 
 ---
 
-## CMD_RETRUDE_PROCESS (0x11) — Confirmed from capture
+## CMD_RETRUDE_PROCESS (0x11): Confirmed from capture
 
 One-shot command, no streaming feedback:
 
@@ -294,7 +294,7 @@ Always the same payload in all observed captures. Retraction is fire-and-confirm
 
 ---
 
-## CMD_VERSION_INFO (0xF0) — Confirmed from capture
+## CMD_VERSION_INFO (0xF0): Confirmed from capture
 
 ```
 REQ: f7 [addr] 04 ff f0 00 [crc]
@@ -361,8 +361,8 @@ DATA_POS  = 5
 ```
 
 Class hierarchy:
-- `Serialhdl_485` — low-level UART: `connect_uart`, `raw_send`, `get_response`
-- `Serial_485_Wrapper` — high-level queue: `cmd_send_data_with_response`,
+- `Serialhdl_485`: low-level UART: `connect_uart`, `raw_send`, `get_response`
+- `Serial_485_Wrapper`: high-level queue: `cmd_send_data_with_response`,
   `send_queue_process`, `handle_callback`, `register_response`
 
 ---
@@ -404,9 +404,9 @@ From `strings` analysis of `box_wrapper.cpython-39.so`:
 ## Protocol Consistency
 
 Identical across all known CFS hardware:
-- Creality Hi (F018) — primary reference, fully validated
-- K1 / K1C — protocol confirmed identical
-- K2 Plus / K2 Max — protocol confirmed identical
+- Creality Hi (F018): primary reference, fully validated
+- K1 / K1C: protocol confirmed identical
+- K2 Plus / K2 Max: protocol confirmed identical
 
 No version branching observed. Function codes, frame format, baud rate, and
 CRC algorithm are identical across all models.

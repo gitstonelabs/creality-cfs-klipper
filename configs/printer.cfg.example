@@ -1,5 +1,5 @@
 # =============================================================================
-# Creality Filament System (CFS) — printer.cfg configuration example
+# Creality Filament System (CFS): printer.cfg configuration example
 # =============================================================================
 #
 # Protocol: CFS RS485 v1 (validated on Creality Hi, K1, K1C, K2 Plus, K2 Max)
@@ -92,4 +92,4 @@ auto_init: True
 # switch_pin: ^EBB:PA2     # replace with your actual GPIO pin
 # pause_on_runout: false   # set True if you want auto-pause on empty
 # runout_gcode:
-#     RESPOND MSG="CFS buffer empty — load filament or pause"
+#     RESPOND MSG="CFS buffer empty, load filament or pause"

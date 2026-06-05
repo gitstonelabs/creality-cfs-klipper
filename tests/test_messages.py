@@ -1,5 +1,5 @@
 """
-test_messages.py — Unit tests for build_message() and parse_message() in creality_cfs.py.
+test_messages.py: Unit tests for build_message() and parse_message() in creality_cfs.py.
 
 Tests cover:
   - Message frame construction: header, address, length, status, func, data, CRC
@@ -343,7 +343,7 @@ class TestParseMessageRejection:
     def test_parse_message_bad_crc_sets_crc_valid_false(self):
         """parse_message() returns a dict with crc_valid=False for wrong CRC byte.
 
-        A bad CRC should not return None — the caller needs to know that a
+        A bad CRC should not return None. The caller needs to know that a
         frame arrived but was corrupted, so it can log the error and retry.
         """
         valid = b'\xf7\x01\x03\x00\xa3\xdd'

@@ -1,5 +1,5 @@
 """
-conftest.py — Shared pytest fixtures for the CFS test suite.
+conftest.py: Shared pytest fixtures for the CFS test suite.
 
 Provides:
   - mock_serial: A MagicMock replacing serial.Serial, with a configurable

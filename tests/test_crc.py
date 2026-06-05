@@ -1,5 +1,5 @@
 """
-test_crc.py — Unit tests for the CRC-8/SMBUS algorithm in creality_cfs.py.
+test_crc.py: Unit tests for the CRC-8/SMBUS algorithm in creality_cfs.py.
 
 Algorithm parameters:
   - Polynomial: 0x07
@@ -112,7 +112,7 @@ def test_crc8_rx_vector_matches_expected(scope, expected):
 def test_crc8_empty_input_returns_init_value():
     """CRC of empty bytes is 0x00 (equals the algorithm's init value).
 
-    Verifies the no-data edge case — processing zero bytes must return the
+    Verifies the no-data edge case: processing zero bytes must return the
     starting accumulator value without executing any iterations.
     """
     assert crc8_cfs(b"") == 0x00
@@ -284,7 +284,7 @@ def test_crc8_performance_10000_calls_under_one_second():
     The CFS controller issues one CRC per transmitted and received frame.
     During auto-addressing of 4 boxes (5 steps * 4 boxes = 20 frames), plus
     continuous polling, throughput matters.  1 s for 10k operations is a
-    generous threshold — a bitwise implementation should be much faster.
+    generous threshold. A bitwise implementation should be much faster.
     """
     payload = b"\xAA\x55" * 50  # 100 bytes
     start = time.monotonic()

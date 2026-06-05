@@ -1,5 +1,5 @@
 """
-test_gcode_handlers.py — Tests for Klipper G-code command handlers in CrealityCFS.
+test_gcode_handlers.py: Tests for Klipper G-code command handlers in CrealityCFS.
 
 Tests cover:
   - cmd_CFS_INIT: not connected error, success path, exception path
@@ -99,7 +99,7 @@ class TestSerialLifecycle:
         assert cfs_controller._serial is None
 
     def test_disconnect_serial_is_safe_when_already_disconnected(self, cfs_controller):
-        """_disconnect_serial() is idempotent — calling twice does not raise."""
+        """_disconnect_serial() is idempotent: calling twice does not raise."""
         cfs_controller._disconnect_serial()
         cfs_controller._disconnect_serial()  # second call must not raise
         assert cfs_controller._serial is None

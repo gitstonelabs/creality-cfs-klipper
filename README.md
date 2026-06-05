@@ -1,4 +1,4 @@
-# Creality Filament System (CFS) — Klipper Integration
+# Creality Filament System (CFS) Klipper Integration
 
 ![Status](https://img.shields.io/badge/status-beta-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue)
@@ -7,7 +7,7 @@
 ![Hardware Validated](https://img.shields.io/badge/hardware-validated-brightgreen)
 
 Open-source Klipper integration for the Creality Filament System (CFS) multi-material unit.
-Run your CFS on any Klipper printer — no Creality hardware or firmware required.
+Run your CFS on any Klipper printer. No Creality hardware or firmware required.
 
 Maintained by [@gitstonelabs](https://github.com/gitstonelabs)
 
@@ -15,7 +15,7 @@ Maintained by [@gitstonelabs](https://github.com/gitstonelabs)
 
 ## Status
 
-> **v1.1.0 — Beta**
+> **v1.1.1 Beta**
 >
 > - ✅ Protocol fully reverse-engineered from live RS485 traffic captures
 > - ✅ All core commands implemented and validated on physical Creality Hi hardware
@@ -50,7 +50,7 @@ Klipper extra module. With this module you can:
 
 | Hardware | Status |
 |----------|--------|
-| Creality Hi (F018) | ✅ Validated — primary reference hardware |
+| Creality Hi (F018) | ✅ Validated (primary reference hardware) |
 | K1 / K1C | ✅ Protocol confirmed identical |
 | K2 Plus / K2 Max | ✅ Protocol confirmed identical |
 | Any printer + USB-RS485 adapter | ✅ Confirmed working (CH341 dongle) |
@@ -77,7 +77,7 @@ wget https://raw.githubusercontent.com/gitstonelabs/creality-cfs-klipper/main/sr
 
 ```ini
 [creality_cfs]
-serial_port: /dev/ttyUSB0   # USB-RS485 adapter — use by-id path if available
+serial_port: /dev/ttyUSB0   # USB-RS485 adapter (use by-id path if available)
 baud: 230400
 box_count: 1                # number of CFS boxes in your daisy-chain (1-4)
 ```
@@ -100,7 +100,7 @@ The CFS uses a 6-pin connector. Wire the adapter to:
 | Pin 5 | Green | GND | Dongle GND |
 | Pin 6 | Blue | RS485-B | Dongle B- |
 
-Power (24V on pin 4, GND on pin 5) must come from your printer PSU — the dongle
+Power (24V on pin 4, GND on pin 5) must come from your printer PSU. The dongle
 carries data only.
 
 For buffer state monitoring, wire a GPIO input:
@@ -111,7 +111,7 @@ For buffer state monitoring, wire a GPIO input:
 | Pin 5 | Green | GND | GPIO GND |
 
 ```ini
-# In printer.cfg — buffer state monitoring (optional)
+# In printer.cfg: buffer state monitoring (optional)
 [filament_switch_sensor cfs_buffer]
 switch_pin: ^YOUR_GPIO_PIN   # e.g. ^EBB:PA2
 pause_on_runout: false
@@ -137,13 +137,13 @@ CFS_VERSION BOX=1
 
 | Command | Description |
 |---------|-------------|
-| `CFS_INIT` | Run auto-addressing sequence — discovers and assigns addresses to all CFS boxes |
+| `CFS_INIT` | Run auto-addressing sequence; discovers and assigns addresses to all CFS boxes |
 | `CFS_STATUS [BOX=N]` | Query box operating state (IDLE / BUSY / ACTIVE) |
 | `CFS_VERSION [BOX=N]` | Query firmware version/serial number string |
 | `CFS_FW_VERSION BOX=N` | Query 0xF0 firmware version string (e.g. `cfs0_050_G32`) |
 | `CFS_SET_MODE BOX=N MODE=N` | Set box mode (0=standby, 1=load) |
 | `CFS_SET_PRELOAD BOX=N MASK=N ENABLE=N` | Configure slot pre-loading |
-| `CFS_EXTRUDE BOX=N` | Run extrude sequence — feeds filament to toolhead, reports position |
+| `CFS_EXTRUDE BOX=N` | Run extrude sequence; feeds filament to toolhead, reports position |
 | `CFS_RETRUDE BOX=N` | Retract filament back into CFS box |
 | `CFS_ADDR_TABLE` | Print address assignment table |
 
@@ -165,9 +165,9 @@ All commands confirmed from live RS485 traffic captures. See [docs/protocol.md](
 
 This protocol was reverse-engineered through:
 
-1. **Source analysis** — `auto_addr_wrapper.py` from `CrealityOfficial/Hi_Klipper` (GPL-3.0)
-2. **Binary analysis** — `strings` extraction from `box_wrapper.cpython-39.so` and `serial_485_wrapper.cpython-39.so`
-3. **Live RS485 capture** — USB-RS485 sniffer on Creality Hi during T0→T1→T2→T3 tool changes
+1. **Source analysis:** `auto_addr_wrapper.py` from `CrealityOfficial/Hi_Klipper` (GPL-3.0)
+2. **Binary analysis:** `strings` extraction from `box_wrapper.cpython-39.so` and `serial_485_wrapper.cpython-39.so`
+3. **Live RS485 capture:** USB-RS485 sniffer on Creality Hi during T0→T1→T2→T3 tool changes
 
 Raw capture files are in [`captures/`](captures/) for independent verification.
 
@@ -183,7 +183,11 @@ escalation is a formal complaint with the
 
 ## Roadmap
 
-### ✅ v1.1.0 — Beta (current)
+### ✅ v1.1.1 Beta (current)
+- Stock box_wrapper.so cross-reference: 7 commands confirmed identical, 10 inventoried as TODO pending a capture
+- Documented the steer/camera (addr 0x41) and external_material/RFID (addr 0x11) CFS modules
+
+### ✅ v1.1.0 Beta
 - All protocol commands confirmed from live hardware capture
 - CMD_EXTRUDE_PROCESS (0x10) and CMD_RETRUDE_PROCESS (0x11) implemented
 - CMD_GET_BOX_STATE (0x08) corrected (was wrong function code 0x0A)
@@ -191,12 +195,12 @@ escalation is a formal complaint with the
 - USB-RS485 operation confirmed on mainline Klipper
 - Buffer switch confirmed as direct GPIO, not RS485
 
-### 🔵 v1.2.0 — Tool Change Macros
+### 🔵 v1.2.0 Tool Change Macros
 - T0/T1/T2/T3 macro set replacing box_wrapper.so functionality
 - Full automated multi-material tool change on mainline Klipper
 - Validated on BTT Octopus + Jetson Orin Nano
 
-### 🟢 v2.0.0 — Production Release
+### 🟢 v2.0.0 Production Release
 - Validated on multiple third-party hardware combinations
 - Community testing incorporated
 - OrcaSlicer / SuperSlicer profile for direct CFS support
@@ -206,14 +210,14 @@ escalation is a formal complaint with the
 
 ## Related Projects
 
-- [fake-name/cfs-reverse-engineering](https://github.com/fake-name/cfs-reverse-engineering) — hardware interposer approach, board images, partial protocol decodes
-- [ityshchenko/klipper-cfs](https://github.com/ityshchenko/klipper-cfs) — alternative community Klipper CFS module
+- [fake-name/cfs-reverse-engineering](https://github.com/fake-name/cfs-reverse-engineering): hardware interposer approach, board images, partial protocol decodes
+- [ityshchenko/klipper-cfs](https://github.com/ityshchenko/klipper-cfs): alternative community Klipper CFS module
 
 ---
 
 ## License
 
-GNU General Public License v3.0 — see [LICENSE](LICENSE).
+GNU General Public License v3.0. See [LICENSE](LICENSE).
 
 ---
 

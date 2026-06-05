@@ -16,6 +16,8 @@ develop-eggs/
 .installed.cfg
 lib/
 lib64/
+.venv/
+venv/
 
 # Testing / coverage
 .pytest_cache/

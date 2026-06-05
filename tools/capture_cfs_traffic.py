@@ -59,7 +59,7 @@ STATUS_NAMES: dict = {
 }
 
 # ---------------------------------------------------------------------------
-# CRC-8/SMBUS (identical to creality_cfs.py — must stay in sync)
+# CRC-8/SMBUS (identical to creality_cfs.py: must stay in sync)
 # ---------------------------------------------------------------------------
 
 def crc8_cfs(data: bytes) -> int:
@@ -85,7 +85,7 @@ def parse_frame(raw: bytes) -> dict | None:
     Returns a dict with all fields plus crc_valid flag, or None if
     the frame is malformed (wrong header, implausible length).
     A frame with a bad CRC is returned with crc_valid=False rather
-    than discarded — so the caller can decide whether to log it.
+    than discarded, so the caller can decide whether to log it.
     """
     if len(raw) < MIN_FRAME_LEN:
         return None
@@ -126,7 +126,7 @@ def parse_frame(raw: bytes) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Frame reader — syncs on 0xF7, reads exact frame length
+# Frame reader: syncs on 0xF7, reads exact frame length
 # ---------------------------------------------------------------------------
 
 def read_frame(ser: serial.Serial, buf: bytearray) -> tuple[bytes | None, bytearray]:
@@ -207,7 +207,7 @@ def capture_traffic(
     logged_count = 0
     crc_error_count = 0
 
-    logger.info("Capture running — press Ctrl+C to stop")
+    logger.info("Capture running. Press Ctrl+C to stop")
 
     with open(output_path, "a", encoding="utf-8") as log_file:
         # Write a session header so multiple runs in the same file are separated

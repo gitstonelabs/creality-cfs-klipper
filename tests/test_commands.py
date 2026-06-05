@@ -1,26 +1,26 @@
 """
-test_commands.py — Tests for individual CFS command implementations in CrealityCFS.
+test_commands.py: Tests for individual CFS command implementations in CrealityCFS.
 
 Tests use a MockCFSHardware wired through a mock serial transport so every
 test exercises real build_message / _send_command / _read_response code paths
 without physical hardware.
 
 Covered commands:
-  0x0B CMD_LOADER_TO_APP     — wake broadcast
-  0xA1 CMD_GET_SLAVE_INFO    — discovery broadcast
-  0xA0 CMD_SET_SLAVE_ADDR    — address assignment
-  0xA2 CMD_ONLINE_CHECK      — verify assignment
-  0xA3 CMD_GET_ADDR_TABLE    — confirm full table
-  0x04 CMD_SET_BOX_MODE      — set operating mode (addr, mode, param)
-  0x0A CMD_GET_BOX_STATE     — query 4-byte box state
-  0x0D CMD_SET_PRE_LOADING   — configure pre-loading slot mask
-  0x14 CMD_GET_VERSION_SN    — query 22-byte ASCII version/SN
+  0x0B CMD_LOADER_TO_APP     wake broadcast
+  0xA1 CMD_GET_SLAVE_INFO    discovery broadcast
+  0xA0 CMD_SET_SLAVE_ADDR    address assignment
+  0xA2 CMD_ONLINE_CHECK      verify assignment
+  0xA3 CMD_GET_ADDR_TABLE    confirm full table
+  0x04 CMD_SET_BOX_MODE      set operating mode (addr, mode, param)
+  0x0A CMD_GET_BOX_STATE     query 4-byte box state
+  0x0D CMD_SET_PRE_LOADING   configure pre-loading slot mask
+  0x14 CMD_GET_VERSION_SN    query 22-byte ASCII version/SN
 
 Stubbed (NotImplementedError):
   0x10 CMD_EXTRUDE_PROCESS
   0x11 CMD_RETRUDE_PROCESS
 
-All tests are independent — no shared mutable state between tests.
+All tests are independent: no shared mutable state between tests.
 """
 
 import sys
@@ -99,7 +99,7 @@ class TestCmdLoaderToApp:
 
         def _capture_write(data):
             written_frames.append(data)
-            # No response queued — LOADER_TO_APP expects no reply
+            # No response queued: LOADER_TO_APP expects no reply
             return None
 
         cfs_controller._serial.write.side_effect = _capture_write
@@ -191,7 +191,7 @@ class TestCmdSetSlaveAddr:
 
     def test_cmd_set_slave_addr_returns_false_on_no_response(self, cfs_controller):
         """_set_slave_addr() returns False when no response is received."""
-        # Queue is empty — no response
+        # Queue is empty: no response
         uniid = [0x01, 0x00, 0x5C, 0x51, 0x30, 0x03, 0x14, 0x91, 0xB0, 0x15, 0x4C, 0x30]
         result = cfs_controller._set_slave_addr(BROADCAST_ADDR_MB, 0x01, uniid)
         assert result is False
@@ -210,7 +210,7 @@ class TestCmdOnlineCheck:
         assert msg == b'\xf7\x01\x03\x00\xa2\xda'
 
     def test_cmd_online_check_empty_data_payload(self):
-        """CMD_ONLINE_CHECK has no data payload — LENGTH=3."""
+        """CMD_ONLINE_CHECK has no data payload: LENGTH=3."""
         msg = build_message(0x01, STATUS_ADDRESSING, CMD_ONLINE_CHECK)
         assert msg[2] == 3
         assert len(msg) == 6
@@ -353,7 +353,7 @@ class TestCmdGetBoxState:
 
 
     def test_cmd_get_box_state_no_data_payload(self):
-        """GET_BOX_STATE has no data payload — LENGTH=3, total 6 bytes."""
+        """GET_BOX_STATE has no data payload: LENGTH=3, total 6 bytes."""
         msg = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE)
         assert msg[2] == 3
         assert len(msg) == 6

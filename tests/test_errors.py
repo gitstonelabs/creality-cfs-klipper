@@ -1,5 +1,5 @@
 """
-test_errors.py — Error handling and failure path tests for CrealityCFS.
+test_errors.py: Error handling and failure path tests for CrealityCFS.
 
 Tests cover:
   - Timeout: serial returns nothing, handler deals gracefully
@@ -10,7 +10,7 @@ Tests cover:
   - Serial not connected: RuntimeError before any I/O
   - Error injection via MockCFSHardware.inject_error()
 
-All timing is mocked — no real sleeps or hardware timeouts.
+All timing is mocked. No real sleeps or hardware timeouts.
 """
 
 import sys
@@ -92,7 +92,7 @@ class TestTimeoutNoResponse:
         Addressing broadcast commands legitimately get no reply when no device
         is present, so the method must return None rather than raising.
         """
-        # Serial queue is empty — every read() returns b""
+        # Serial queue is empty: every read() returns b""
         result = cfs_controller._send_command(
             BROADCAST_ADDR_MB, STATUS_ADDRESSING, CMD_GET_SLAVE_INFO,
             data=bytes([BROADCAST_ADDR_MB, BROADCAST_ADDR_MB]),
@@ -163,7 +163,7 @@ class TestRetryLogic:
             retries=3,
         )
         # With the chunked read approach the controller reads 3 bytes then remainder
-        # The mock above is simplified — test that it either succeeds or raises after retries
+        # The mock above is simplified: test that it either succeeds or raises after retries
         # The key assertion is that write was called multiple times (retries happened)
         assert cfs_controller._serial.write.call_count >= 1
 
@@ -219,7 +219,7 @@ class TestCRCMismatchResponse:
         """_send_command() rejects responses with bad CRC and retries.
 
         A corrupted last byte (CRC field) must not be returned as a valid
-        response — this would silently deliver wrong data to callers.
+        response, since this would silently deliver wrong data to callers.
         """
         # Valid frame: b'\xf7\x01\x03\x00\x0a\x5c'... build one with bad CRC
         valid = build_message(0x01, STATUS_ADDRESSING, CMD_GET_BOX_STATE)
@@ -250,14 +250,14 @@ class TestCRCMismatchResponse:
 # ===========================================================================
 
 class TestMalformedResponse:
-    """Tests for robustness against malformed response frames."""
+    """Tests for handling of malformed response frames."""
 
     def test_malformed_response_too_short_rejected(self, cfs_controller):
         """_read_response() returns empty when header read yields <3 bytes.
 
         Simulates a truncated preamble (RS485 collision or packet loss).
         """
-        # Only 2 bytes — header read returns b'\xf7\x01' (incomplete)
+        # Only 2 bytes: header read returns b'\xf7\x01' (incomplete)
         cfs_controller._serial.response_queue.append(b'\xf7\x01')
 
         result = cfs_controller._send_command(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE,
@@ -277,7 +277,7 @@ class TestMalformedResponse:
     def test_malformed_response_implausible_length_rejected(self, cfs_controller):
         """_read_response() rejects frames with LENGTH < 3 or > MAX_DATA_LEN+3.
 
-        LENGTH=2 is below the minimum (STATUS+FUNC+CRC=3) — this frame cannot
+        LENGTH=2 is below the minimum (STATUS+FUNC+CRC=3); this frame cannot
         be valid and should be discarded rather than causing an index error.
         """
         # Valid header but LENGTH=2 (implausible: below minimum of 3)
@@ -333,7 +333,7 @@ class TestSerialExceptionHandling:
         """_send_command() stops retrying immediately on SerialException from write().
 
         A hardware-level I/O error (disconnected cable) should not be retried
-        indefinitely — it must break the loop and propagate.
+        indefinitely; it must break the loop and propagate.
         """
         import serial as serial_mod
 

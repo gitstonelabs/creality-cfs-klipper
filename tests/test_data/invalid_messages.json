@@ -8,25 +8,25 @@
   {
     "hex": "000000 000000",
     "error": "bad_header",
-    "description": "All-zero frame — wrong header",
+    "description": "All-zero frame, wrong header",
     "expected_result": "None"
   },
   {
     "hex": "f701",
     "error": "truncated",
-    "description": "Only 2 bytes — below MIN_MSG_LEN=6",
+    "description": "Only 2 bytes, below MIN_MSG_LEN=6",
     "expected_result": "None"
   },
   {
     "hex": "f70103",
     "error": "truncated",
-    "description": "Only 3 bytes — below MIN_MSG_LEN=6",
+    "description": "Only 3 bytes, below MIN_MSG_LEN=6",
     "expected_result": "None"
   },
   {
     "hex": "f7010300",
     "error": "truncated",
-    "description": "4 bytes — still too short",
+    "description": "4 bytes, still too short",
     "expected_result": "None"
   },
   {
@@ -44,7 +44,7 @@
   {
     "hex": "f70108ff0a000000",
     "error": "truncated_payload",
-    "description": "LENGTH=8 claims 5 data bytes but frame ends after 2 — truncated",
+    "description": "LENGTH=8 claims 5 data bytes but frame ends after 2, truncated",
     "expected_result": "None"
   },
   {

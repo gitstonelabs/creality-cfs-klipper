@@ -1,22 +1,22 @@
 """
-test_integration.py — Integration tests for the CrealityCFS module.
+test_integration.py: Integration tests for the CrealityCFS module.
 
 These tests exercise complete request-response cycles using MockCFSHardware
 wired through a mock serial transport.  Every test path exercises:
-  1. build_message() — frame construction
-  2. serial write — transmission
-  3. MockCFSHardware.process_message() — CRC validation + response generation
-  4. _read_response() — frame reassembly from chunked reads
-  5. parse_message() — response parsing and CRC validation
+  1. build_message(): frame construction
+  2. serial write: transmission
+  3. MockCFSHardware.process_message(): CRC validation + response generation
+  4. _read_response(): frame reassembly from chunked reads
+  5. parse_message(): response parsing and CRC validation
 
 No physical hardware is required.
 
 Test suites:
-  TestInitializationWorkflow  — full 5-step auto-addressing
-  TestStatusPolling           — GET_BOX_STATE for all boxes
-  TestVersionQuery            — GET_VERSION_SN for all boxes
-  TestSingleBoxWorkflow       — end-to-end single-box sequence
-  TestBoxAddressAllocation    — _allocate_address() priority logic
+  TestInitializationWorkflow  full 5-step auto-addressing
+  TestStatusPolling           GET_BOX_STATE for all boxes
+  TestVersionQuery            GET_VERSION_SN for all boxes
+  TestSingleBoxWorkflow       end-to-end single-box sequence
+  TestBoxAddressAllocation    _allocate_address() priority logic
 """
 
 import sys

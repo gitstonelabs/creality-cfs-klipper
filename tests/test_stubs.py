@@ -24,7 +24,7 @@ def make_cfs_with_mock_send(send_return=None):
 
 
 # ---------------------------------------------------------------------------
-# CMD_EXTRUDE_PROCESS (0x10) — real implementation tests
+# CMD_EXTRUDE_PROCESS (0x10): real implementation tests
 # ---------------------------------------------------------------------------
 
 class TestExtrudeProcess:
@@ -104,7 +104,7 @@ class TestExtrudeProcess:
         """Addresses 0x01-0x04 are accepted without ValueError."""
         instance = make_cfs_with_mock_send(send_return=None)
         for addr in [0x01, 0x02, 0x03, 0x04]:
-            # Should not raise — returns dict even with no serial response
+            # Should not raise: returns dict even with no serial response
             result = instance.extrude_process(addr)
             assert isinstance(result, dict)
 
@@ -127,7 +127,7 @@ class TestExtrudeProcess:
 
 
 # ---------------------------------------------------------------------------
-# CMD_RETRUDE_PROCESS (0x11) — real implementation tests
+# CMD_RETRUDE_PROCESS (0x11): real implementation tests
 # ---------------------------------------------------------------------------
 
 class TestRetrudeProcess:
@@ -178,7 +178,7 @@ class TestRetrudeProcess:
         assert data == bytes([0x02, 0x01])
 
     def test_retrude_process_is_single_command(self):
-        """Retrude is one-shot — only one _send_command call."""
+        """Retrude is one-shot: only one _send_command call."""
         instance = make_cfs_with_mock_send(send_return=None)
         instance.retrude_process(0x01)
         assert instance._send_command.call_count == 1

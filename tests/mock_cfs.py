@@ -1,5 +1,5 @@
 """
-mock_cfs.py — MockCFSHardware simulator for CFS RS485 protocol testing.
+mock_cfs.py: MockCFSHardware simulator for CFS RS485 protocol testing.
 
 Simulates the response behavior of 1-4 Creality Filament System boxes over
 RS485, including CRC validation of received messages, state tracking, and
@@ -168,7 +168,7 @@ class MockCFSHardware:
         elif func == CMD_GET_VERSION_SN:
             return self._resp_get_version_sn(addr, data)
         else:
-            # Unknown command — return None (no response)
+            # Unknown command: return None (no response)
             return None
 
     # -----------------------------------------------------------------------
@@ -176,7 +176,7 @@ class MockCFSHardware:
     # -----------------------------------------------------------------------
 
     def _resp_loader_to_app(self, addr, data):
-        """CMD_LOADER_TO_APP: broadcast wakeup — no response expected per protocol."""
+        """CMD_LOADER_TO_APP: broadcast wakeup, no response expected per protocol."""
         # Boxes do not respond to the broadcast wake command
         return None
 

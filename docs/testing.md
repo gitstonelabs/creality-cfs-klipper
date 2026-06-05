@@ -1,6 +1,6 @@
 # CFS Test Suite
 
-Comprehensive pytest test suite for `creality_cfs.py` — the Klipper extra module
+Full pytest test suite for `creality_cfs.py`, the Klipper extra module
 for the Creality Filament System (CFS) RS485 protocol.
 
 No physical hardware is required.  All tests use `MockCFSHardware` to simulate
@@ -66,7 +66,7 @@ pytest tests/ -m integration
 | `test_integration.py` | integration | 25+ | Full workflows: init, polling, version query, address allocation |
 | `test_errors.py` | integration | 20+ | Timeouts, retries, CRC errors, malformed frames, serial exceptions |
 | `test_stubs.py` | unit | 12 | NotImplementedError for 0x10/0x11, error message content |
-| `mock_cfs.py` | helper | — | `MockCFSHardware`: CRC-validating simulator for all 9 commands |
+| `mock_cfs.py` | helper | n/a | `MockCFSHardware`: CRC-validating simulator for all 9 commands |
 
 ---
 
@@ -75,9 +75,9 @@ pytest tests/ -m integration
 Target: **>80%** of `creality_cfs.py`
 
 The following code paths are intentionally excluded from coverage:
-- `load_config()` — requires a live Klipper config object
-- G-code handlers (`cmd_CFS_*`) — require `gcmd` mock; covered by integration plan
-- `extrude_process()` / `retrude_process()` — raise NotImplementedError (no payload)
+- `load_config()`: requires a live Klipper config object
+- G-code handlers (`cmd_CFS_*`): require `gcmd` mock; covered by integration plan
+- `extrude_process()` / `retrude_process()`: raise NotImplementedError (no payload)
 
 The `raise NotImplementedError` lines in stubs are excluded via `.coveragerc`
 `exclude_lines` because they cannot be exercised without knowing the payload.
@@ -123,11 +123,11 @@ hw.reset()
 ```
 
 Supported error types:
-- `ERROR_TIMEOUT` — returns None (no response)
-- `ERROR_CRC` — corrupts the CRC byte of the response
-- `ERROR_TRUNCATED` — truncates the response to 3 bytes
-- `ERROR_GARBAGE` — returns `b'\xAA\xBB\xCC\xDD\xEE'`
-- `ERROR_NACK` — (reserved for future use)
+- `ERROR_TIMEOUT`: returns None (no response)
+- `ERROR_CRC`: corrupts the CRC byte of the response
+- `ERROR_TRUNCATED`: truncates the response to 3 bytes
+- `ERROR_GARBAGE`: returns `b'\xAA\xBB\xCC\xDD\xEE'`
+- `ERROR_NACK`: (reserved for future use)
 
 ---
 

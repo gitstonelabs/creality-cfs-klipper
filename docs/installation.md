@@ -1,6 +1,6 @@
-# Creality Filament System (CFS) — Klipper Integration Installation Guide
+# Creality Filament System (CFS) Klipper Integration Installation Guide
 
-**Module version:** 1.1.0 (beta)
+**Module version:** 1.1.1 (beta)
 **Protocol confidence:** all commands confirmed against live RS485 capture
 **Klipper compatibility:** v0.11.0+
 
@@ -36,13 +36,13 @@
 Copy the module and config files to the correct locations:
 
 ```bash
-# Primary module — must be in the Klipper extras directory
+# Primary module: must be in the Klipper extras directory
 cp creality_cfs.py ~/klipper/klippy/extras/creality_cfs.py
 
-# Optional: macros file — place alongside printer.cfg
+# Optional: macros file, place alongside printer.cfg
 cp cfs_macros.cfg ~/printer_data/config/cfs_macros.cfg
 
-# Optional: example config — for reference only
+# Optional: example config, for reference only
 cp printer.cfg.example ~/printer_data/config/printer.cfg.example
 ```
 
@@ -93,7 +93,7 @@ sudo systemctl restart klipper
 
 Run these commands in sequence from the Klipper console (Mainsail, Fluidd, or Moonraker terminal) to verify the integration:
 
-### Step 1 — Verify module loaded
+### Step 1: Verify module loaded
 
 Check `klippy.log` for the following line:
 
@@ -103,7 +103,7 @@ creality_cfs: module loaded, port=/dev/ttyS5 baud=230400
 
 If this line is absent, see [Troubleshooting](#8-troubleshooting).
 
-### Step 2 — Run auto-addressing
+### Step 2: Run auto-addressing
 
 ```gcode
 CFS_INIT
@@ -117,7 +117,7 @@ CFS auto-addressing complete: 4/4 box(es) online
 
 If you see `0/4 box(es) online`, see [Troubleshooting](#8-troubleshooting).
 
-### Step 3 — Query firmware versions
+### Step 3: Query firmware versions
 
 ```gcode
 CFS_VERSION
@@ -132,7 +132,7 @@ Box 3 (0x03): 1101000084321 5B625AHSC
 Box 4 (0x04): 1101000084321 5B625AHSC
 ```
 
-### Step 4 — Check box states
+### Step 4: Check box states
 
 ```gcode
 CFS_STATUS
@@ -148,7 +148,7 @@ Box 2 (0x02): state=0x1C raw=1c140000
 
 The exact state codes are hardware-dependent. Any response without an error confirms the boxes are communicating.
 
-### Step 5 — View the address table
+### Step 5: View the address table
 
 ```gcode
 CFS_ADDR_TABLE
@@ -162,7 +162,7 @@ This prints all address slots, their UniIDs, online state, and mode.
 
 | Command | Parameters | Description |
 |---------|-----------|-------------|
-| `CFS_INIT` | — | Run full 5-step auto-addressing sequence |
+| `CFS_INIT` | none | Run full 5-step auto-addressing sequence |
 | `CFS_STATUS` | `[BOX=1-4]` | Query GET_BOX_STATE; omit BOX for all boxes |
 | `CFS_VERSION` | `[BOX=1-4]` | Query GET_VERSION_SN; omit BOX for all boxes |
 | `CFS_FW_VERSION` | `BOX=1-4` | Query 0xF0 firmware version string |
@@ -170,7 +170,7 @@ This prints all address slots, their UniIDs, online state, and mode.
 | `CFS_SET_PRELOAD` | `BOX=1-4 MASK=0-255 ENABLE=0\|1` | Configure pre-loading slots |
 | `CFS_EXTRUDE` | `BOX=1-4` | Load filament from CFS to toolhead (streams position feedback) |
 | `CFS_RETRUDE` | `BOX=1-4` | Retract filament back into CFS box |
-| `CFS_ADDR_TABLE` | — | Print current address assignment table |
+| `CFS_ADDR_TABLE` | none | Print current address assignment table |
 
 ### Macro commands (from cfs_macros.cfg)
 
@@ -195,7 +195,7 @@ This prints all address slots, their UniIDs, online state, and mode.
 
 ### Half-duplex RS485 direction switching
 
-The module does not manually toggle RTS — Creality's RS485 hardware (and CH341 USB-RS485 dongles) handle direction switching automatically. If you're using a third-party adapter that requires manual RTS control, you'll need to modify `_connect_serial()` to enable `serial.rs485.RS485Settings()`.
+The module does not manually toggle RTS. Creality's RS485 hardware (and CH341 USB-RS485 dongles) handle direction switching automatically. If you're using a third-party adapter that requires manual RTS control, you'll need to modify `_connect_serial()` to enable `serial.rs485.RS485Settings()`.
 
 ### Broadcast discovery may miss boxes
 
@@ -252,15 +252,15 @@ Attach the raw hex bytes, what operation triggered them, and the CFS firmware ve
 
 ### CRC errors in klippy.log
 
-**Symptom:** `creality_cfs: CRC mismatch — received 0xXX, calculated 0xYY`
+**Symptom:** `creality_cfs: CRC mismatch: received 0xXX, calculated 0xYY`
 
 **Steps:**
 1. Verify baud rate matches the CFS hub (`baud: 230400`).
-2. Check RS485 cable integrity — loose connections cause bit errors.
+2. Check RS485 cable integrity; loose connections cause bit errors.
 3. Verify the RS485 termination resistor is present if cable is long (>2 m).
 4. Check for ground loops between the printer host board and CFS hub.
 
-### Timeout — boxes not responding
+### Timeout: boxes not responding
 
 **Symptom:** `0/4 box(es) online` after `CFS_INIT`
 
@@ -269,7 +269,7 @@ Attach the raw hex bytes, what operation triggered them, and the CFS firmware ve
 2. Verify the RS485 cable is connected to the correct port.
 3. Increase timeout: `timeout: 0.5` in printer.cfg and retry `CFS_INIT`.
 4. Run `CFS_ADDR_TABLE` to see which addresses have been attempted.
-5. Try running `CFS_INIT` twice — boxes may need one broadcast to wake up.
+5. Try running `CFS_INIT` twice; boxes may need one broadcast to wake up.
 
 ### Motor jam / MOTOR_LOAD_ERR (0x22)
 

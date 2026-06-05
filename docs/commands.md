@@ -66,7 +66,7 @@ Parameters:
 
 ### CFS_EXTRUDE
 
-Runs the full CMD_EXTRUDE_PROCESS (0x10) sequence — starts the CFS motor,
+Runs the full CMD_EXTRUDE_PROCESS (0x10) sequence: starts the CFS motor,
 polls status, streams position feedback. Reports final filament position in mm.
 
 ```
@@ -90,7 +90,7 @@ Parameters:
 
 ### CFS_RETRUDE
 
-Sends CMD_RETRUDE_PROCESS (0x11) — retracts filament back into the CFS box.
+Sends CMD_RETRUDE_PROCESS (0x11) to retract filament back into the CFS box.
 One-shot command, acknowledges when retraction is complete.
 
 ```
@@ -158,8 +158,8 @@ CFS_ADDR_TABLE
 | `CFS_RETRUDE` | 0x11 | ✅ Confirmed from capture |
 | `CFS_SET_MODE` | 0x04 | ✅ Confirmed |
 | `CFS_SET_PRELOAD` | 0x0D | ✅ Confirmed |
-| `CFS_ADDR_TABLE` | — | ✅ Local table |
-| `get_rfid()` | 0x02 | 🔵 Partial — response format unconfirmed |
+| `CFS_ADDR_TABLE` | n/a | ✅ Local table |
+| `get_rfid()` | 0x02 | 🔵 Partial, response format unconfirmed |
 
 ---
 
@@ -236,7 +236,7 @@ and `filament_rack_wrapper.cpython-39.so` on the Creality Hi.
 | `BOX_SEND_DATA` | UNKNOWN | Generic low-level data send |
 | `BOX_NUM_POS` | UNKNOWN | Number/position query |
 
-### Addressing Commands (auto_addr_wrapper.py — full source available)
+### Addressing Commands (auto_addr_wrapper.py, full source available)
 
 | Command | Function Code | Description |
 |---------|--------------|-------------|
@@ -306,7 +306,7 @@ CFS Box (slots 1-4)
 ```
 
 The box extruder motor and toolhead extruder run simultaneously during loading
-— box pushes, toolhead pulls. The buffer absorbs the rate difference.
+box pushes, toolhead pulls. The buffer absorbs the rate difference.
 
 The cutter is triggered mechanically by the toolhead reaching the right X-rail
 limit (X=260 on the Creality Hi 260x260 bed). The lever at that position
@@ -318,7 +318,7 @@ depresses the cutter blade. A hall sensor or mechanical switch confirms the cut.
 
 - All commands use 8N1 at 230400 baud (confirmed from capture)
 - `STATUS=0xFF` for operational requests confirmed from live capture (v1.1.0)
-- Buffer state is GPIO-only — no RS485 command needed or observed
+- Buffer state is GPIO-only, no RS485 command needed or observed
 - `CMD_GET_BUFFER_STATE` from box_wrapper.so strings may not exist as a
   separate RS485 command since the buffer uses direct GPIO lines
 

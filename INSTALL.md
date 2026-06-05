@@ -4,7 +4,7 @@
 
 # Installation Guide
 
-### Creality CFS — Klipper Integration
+### Creality CFS Klipper Integration
 
 [![Status](https://img.shields.io/badge/status-beta-00d4ff?style=flat-square)](https://github.com/gitstonelabs/creality-cfs-klipper)
 [![License](https://img.shields.io/badge/license-GPL--3.0-4dd0e1?style=flat-square)](LICENSE)
@@ -14,7 +14,7 @@
 
 ---
 
-A complete walkthrough for installing the Creality CFS Klipper module on any Klipper-based 3D printer — including non-Creality hardware.
+A complete walkthrough for installing the Creality CFS Klipper module on any Klipper-based 3D printer, including non-Creality hardware.
 
 > **TL;DR:** Drop one Python file into Klipper's extras directory, add a 5-line config block, wire a $5 USB-RS485 adapter to the CFS connector, run `CFS_INIT`. Total time: ~15 minutes.
 
@@ -35,7 +35,7 @@ A complete walkthrough for installing the Creality CFS Klipper module on any Kli
 
 ## System overview
 
-Your Klipper host (anything that can run Klipper — Hi mainboard, Raspberry Pi, Jetson, BTT CB1, etc.) talks to the CFS box(es) over a half-duplex RS485 bus at 230400 baud. The module replaces Creality's proprietary `box_wrapper.cpython-39.so` + `serial_485_wrapper.cpython-39.so` binaries entirely.
+Your Klipper host (anything that can run Klipper: Hi mainboard, Raspberry Pi, Jetson, BTT CB1, etc.) talks to the CFS box(es) over a half-duplex RS485 bus at 230400 baud. The module replaces Creality's proprietary `box_wrapper.cpython-39.so` + `serial_485_wrapper.cpython-39.so` binaries entirely.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{
@@ -58,7 +58,7 @@ flowchart LR
     class B2,B3,B4 opt;
 ```
 
-**Validated on:** Creality Hi (F018), K1, K1C, K2 Plus, K2 Max — the CFS RS485 protocol is identical across the entire Creality printer family. The same module file works for all of them; only `printer.cfg` differs.
+**Validated on:** Creality Hi (F018), K1, K1C, K2 Plus, K2 Max. The CFS RS485 protocol is identical across the entire Creality printer family. The same module file works for all of them; only `printer.cfg` differs.
 
 ---
 
@@ -175,7 +175,7 @@ cp configs/cfs_macros.cfg ~/printer_data/config/
 
 ### 3. Edit `printer.cfg`
 
-Minimum block — substitute the serial port for your hardware:
+Minimum block, substitute the serial port for your hardware:
 
 ```ini
 # USB-RS485 adapter (most common)
@@ -200,14 +200,14 @@ Full config with every option exposed:
 ```ini
 [creality_cfs]
 serial_port: /dev/ttyUSB0
-baud: 230400      # always 230400 — non-negotiable for CFS
+baud: 230400      # always 230400, non-negotiable for CFS
 timeout: 0.1      # per-byte read timeout
 retry_count: 3    # CRC error retries
 box_count: 1      # 1-4
 auto_init: True   # run CFS_INIT automatically on Klipper start
 ```
 
-> 💡 **Prefer `by-id` paths over `/dev/ttyUSB0`** when using USB adapters — `ttyUSB0` can shift when you plug in other USB devices. `ls /dev/serial/by-id/` to find your adapter's stable path.
+> 💡 **Prefer `by-id` paths over `/dev/ttyUSB0`** when using USB adapters. `ttyUSB0` can shift when you plug in other USB devices. `ls /dev/serial/by-id/` to find your adapter's stable path.
 
 ### 4. Restart Klipper
 
@@ -251,7 +251,7 @@ stateDiagram-v2
 
 Run these from the Klipper console (Mainsail, Fluidd, or Moonraker terminal) **in order**:
 
-### Step 1 — Module loaded
+### Step 1: Module loaded
 
 `grep creality_cfs /var/log/klipper/klippy.log` should show:
 ```
@@ -260,7 +260,7 @@ creality_cfs: module loaded, port=/dev/ttyUSB0 baud=230400
 
 If this line is absent, jump to [troubleshooting](#troubleshooting).
 
-### Step 2 — Auto-addressing
+### Step 2: Auto-addressing
 
 ```
 CFS_INIT
@@ -273,7 +273,7 @@ CFS auto-addressing complete: 4/4 box(es) online
 
 `0/N online` → check wiring polarity, baud rate, and PSU power.
 
-### Step 3 — Firmware versions
+### Step 3: Firmware versions
 
 ```
 CFS_VERSION
@@ -284,7 +284,7 @@ Each box returns its serial + firmware string:
 Box 1 (0x01): 1101000084321 5B625AHSC
 ```
 
-### Step 4 — Live state
+### Step 4: Live state
 
 ```
 CFS_STATUS
@@ -294,9 +294,9 @@ CFS_STATUS
 Box 1 (0x01): state=0x1C raw=1c140000
 ```
 
-`state=0x22` means motor jam — clear the box and re-run `CFS_INIT`.
+`state=0x22` means motor jam. Clear the box and re-run `CFS_INIT`.
 
-### Step 5 — Test load + retract
+### Step 5: Test load + retract
 
 ```
 CFS_EXTRUDE BOX=1
@@ -327,12 +327,12 @@ flowchart LR
 
 ### Addressing
 
-Addresses are assigned **dynamically** by `CFS_INIT` — no DIP switches, no manual numbering. The protocol does:
+Addresses are assigned **dynamically** by `CFS_INIT`: no DIP switches, no manual numbering. The protocol does:
 
 1. Host broadcasts `GET_SLAVE_INFO` with sequence index 1.
 2. The **physically-closest box** (the one wired to the host) responds.
 3. Host assigns it address `0x01` via `SET_SLAVE_ADDR`.
-4. Repeat for index 2, 3, 4 — each box farther down the chain.
+4. Repeat for index 2, 3, 4, each box farther down the chain.
 5. Boxes already addressed stay silent during subsequent rounds.
 
 Re-run `CFS_INIT` any time you change the chain order or hot-swap a box.

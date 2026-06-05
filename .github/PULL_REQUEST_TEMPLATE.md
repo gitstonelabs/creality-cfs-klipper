@@ -24,7 +24,7 @@ Closes #
 - [ ] All existing tests pass (`pytest tests/ -v`)
 - [ ] New tests added for changed code
 - [ ] Coverage remains ≥ 80% (`pytest --cov=src/creality_cfs --cov-fail-under=80 tests/`)
-- [ ] Tested on real hardware (if applicable — describe setup below)
+- [ ] Tested on real hardware (if applicable, describe setup below)
 
 **Hardware test setup (if applicable):**
 
