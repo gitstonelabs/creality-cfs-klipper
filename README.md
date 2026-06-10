@@ -217,7 +217,7 @@ escalation is a formal complaint with the
 
 ## License
 
-GNU General Public License v3.0. See [LICENSE](LICENSE).
+GNU General Public License v3.0. See [LICENSE](LICENSE). The clean-room method and the GPL-3.0 provenance are documented in [NOTICES.md](NOTICES.md).
 
 ---
 

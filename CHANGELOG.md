@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **`NOTICES.md`**: GPL-3.0 license-provenance record. Names the Creality `*.cpython-39.so` CFS wrappers this module replaces, states the clean-room method (live RS-485 capture, protocol decode, on-device open Python), and documents the unanswered GPL-3.0 source requests. Written because the upstream license terms were not honored and a downstream user is entitled to know exactly what they are running and where it came from.
+
+### Changed
+
+- **`README.md`**: link the license section to `NOTICES.md` for the clean-room method and GPL-3.0 provenance.
+
 ## [1.1.1] - 2026-06-03
 
 ### Added
