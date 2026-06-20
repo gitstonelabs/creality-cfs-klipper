@@ -87,9 +87,14 @@ class TestBuildMessageBasic:
         assert msg_addr[3] == STATUS_ADDRESSING == 0x00
 
     def test_build_message_basic_func_field_position(self):
-        """FUNC byte is at index 4."""
+        """FUNC byte is at index 4.
+
+        CMD_GET_BOX_STATE is 0x0A (WIRE-CONFIRMED 2026-06-09/06-19). The 0x08 code is a
+        SEPARATE command (GET_HARDWARE_STATUS); this assertion was stale from the pre-v1.2.0
+        protocol model.
+        """
         msg = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE)
-        assert msg[4] == CMD_GET_BOX_STATE == 0x08
+        assert msg[4] == CMD_GET_BOX_STATE == 0x0A
 
     def test_build_message_basic_crc_is_last_byte(self):
         """CRC is always the final byte, matching manual calculation of msg[2:-1]."""
@@ -186,9 +191,13 @@ class TestBuildMessageCapturedFrames:
         assert msg == b'\xf7\x01\x05\xff\x0d\x0f\x01\x69'
 
     def test_build_cmd_get_box_state_slave_1(self):
-        """CMD_GET_BOX_STATE slave 1 matches b'\\xf7\\x01\\x03\\xff\\x0a\\x5c'."""
+        """CMD_GET_BOX_STATE slave 1 matches b'\\xf7\\x01\\x03\\xff\\x0a\\x5c'.
+
+        Func 0x0A (WIRE-CONFIRMED 2026-06-09/06-19); the expected frame's bytes were stale
+        from the pre-v1.2.0 0x08 model. CRC 0x5C matches test_crc.py TX-get-box-state-slave-1.
+        """
         msg = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE)
-        assert msg == b'\xf7\x01\x03\xff\x08\x52'
+        assert msg == b'\xf7\x01\x03\xff\x0a\x5c'
 
     def test_build_cmd_get_slave_info_broadcast(self):
         """CMD_GET_SLAVE_INFO broadcast matches b'\\xf7\\xfe\\x05\\x00\\xa1\\xfe\\xfe\\xf8'."""

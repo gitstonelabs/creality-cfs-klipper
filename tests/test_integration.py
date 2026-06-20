@@ -182,14 +182,20 @@ class TestStatusPolling:
         result = cfs.get_box_state(0x01)
         assert len(result["raw"]) == 4
 
-    def test_status_polling_state_byte_matches_first_data_byte(self):
-        """get_box_state() 'state' is the first byte of the 4-byte response data."""
+    def test_status_polling_state_byte_matches_second_data_byte(self):
+        """get_box_state() 'state' is the lo byte (data[1]) of the 0x0A state word.
+
+        v1.2.0 wire-confirmed decode: the 0x0A payload is [class_byte=data[0]][state=data[1]].
+        The pre-v1.2.0 model read state from data[0]; corrected from the wire (data[1] = the
+        meaningful 0x20=loaded / 0x1f=feeding byte). class_byte is exposed separately.
+        """
         hw = MockCFSHardware(box_count=1)
         cfs, _ = make_wired_controller(hw, box_count=1, retry_count=1)
         cfs._run_auto_addressing()
 
         result = cfs.get_box_state(0x01)
-        assert result["state"] == result["raw"][0]
+        assert result["state"] == result["raw"][1]
+        assert result["class_byte"] == result["raw"][0]
 
     def test_status_polling_all_4_boxes_sequential(self):
         """get_box_state() can be called sequentially for all 4 boxes."""
@@ -263,9 +269,11 @@ class TestSingleBoxWorkflow:
         online_count = cfs._run_auto_addressing()
         assert online_count == 1
 
-        # Step 2: Query state
+        # Step 2: Query state. The mock returns the captured word [0x1C, 0x14, 0x00, 0x00];
+        # per the v1.2.0 wire-confirmed decode state=data[1]=0x14 (lo byte), class=0x1C.
         state = cfs.get_box_state(0x01)
-        assert state["state"] == 0x1C
+        assert state["state"] == 0x14
+        assert state["class_byte"] == 0x1C
 
     def test_single_box_connect_address_set_mode_standby(self):
         """Single-box: init -> set_box_mode(standby=0x00) -> verify ACK."""

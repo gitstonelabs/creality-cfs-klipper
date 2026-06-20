@@ -17,11 +17,13 @@ The Klipper GCodeCommand interface is mocked so no Klipper environment is needed
 import sys
 import os
 import unittest.mock as mock
+import contextlib
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
+import creality_cfs
 from creality_cfs import (
     CrealityCFS,
     BoxAddressEntry,
@@ -34,6 +36,36 @@ from creality_cfs import (
 from tests.conftest import _make_fake_config
 from tests.mock_cfs import MockCFSHardware
 from tests.conftest import make_wired_controller
+
+
+# ---------------------------------------------------------------------------
+# Helper: patch the v1.3.0 reactor-fd connect path so _connect_serial() runs
+# off-POSIX without a real port. The transport seam moved from serial.Serial to
+# os.open + termios + reactor.register_fd; these patches stand in for that fd
+# layer so the lifecycle tests assert the SAME observable behavior (is_connected
+# transitions, error swallowing) as before.
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _patch_connect_ok(fake_fd=7):
+    """Make _connect_serial() succeed: os.open returns a fake fd, tty/rs485 config no-op.
+
+    Also forces _HAS_POSIX_SERIAL=True so the POSIX-only guard in _connect_serial is exercised
+    as if on a real Linux host (the test box is Windows; the fd layer is fully mocked).
+    """
+    with mock.patch.object(creality_cfs, "_HAS_POSIX_SERIAL", True), \
+         mock.patch.object(creality_cfs.os, "open", return_value=fake_fd), \
+         mock.patch.object(CrealityCFS, "_config_tty", lambda self, fd: None), \
+         mock.patch.object(CrealityCFS, "_config_rs485", lambda self, fd: None):
+        yield
+
+
+@contextlib.contextmanager
+def _patch_connect_fail(exc):
+    """Make _connect_serial() fail at open with the given exception (as on a POSIX host)."""
+    with mock.patch.object(creality_cfs, "_HAS_POSIX_SERIAL", True), \
+         mock.patch.object(creality_cfs.os, "open", side_effect=exc):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -61,28 +93,34 @@ def _make_gcmd(box=None, mode=None, param=None, mask=None, enable=None):
 # ===========================================================================
 
 class TestSerialLifecycle:
-    """Tests for serial port open/close lifecycle."""
+    """Tests for serial port open/close lifecycle (v1.3.0 reactor-fd transport).
+
+    The transport moved from blocking pyserial (serial.Serial) to a non-blocking
+    reactor-fd model (os.open + termios + reactor.register_fd). These tests drive the
+    new open path via the os.open seam and assert the SAME observable behavior.
+    """
 
     def test_connect_serial_sets_is_connected_true(self):
-        """_connect_serial() sets is_connected=True on success."""
+        """_connect_serial() sets is_connected=True on successful open."""
         cfg = _make_fake_config(auto_init=False)
-        mock_ser = mock.MagicMock()
-        mock_ser.is_open = True
-
-        with mock.patch("creality_cfs.serial.Serial", return_value=mock_ser):
-            cfs = CrealityCFS(cfg)
+        cfs = CrealityCFS(cfg)
+        with _patch_connect_ok():
             cfs._connect_serial()
 
         assert cfs.is_connected is True
 
-    def test_connect_serial_raises_on_serial_exception(self):
-        """_connect_serial() re-raises SerialException and sets is_connected=False."""
+    def test_connect_serial_raises_on_open_error(self):
+        """_connect_serial() propagates the open error and leaves is_connected=False.
+
+        Was test_connect_serial_raises_on_serial_exception: serial.SerialException is an
+        OSError, so simulating it as the os.open failure preserves the original intent (a
+        hardware-level open error must propagate, not be silently swallowed here).
+        """
         import serial as serial_mod
         cfg = _make_fake_config(auto_init=False)
+        cfs = CrealityCFS(cfg)
 
-        with mock.patch("creality_cfs.serial.Serial",
-                        side_effect=serial_mod.SerialException("port busy")):
-            cfs = CrealityCFS(cfg)
+        with _patch_connect_fail(serial_mod.SerialException("port busy")):
             with pytest.raises(serial_mod.SerialException):
                 cfs._connect_serial()
 
@@ -93,16 +131,22 @@ class TestSerialLifecycle:
         cfs_controller._disconnect_serial()
         assert cfs_controller.is_connected is False
 
-    def test_disconnect_serial_sets_serial_to_none(self, cfs_controller):
-        """_disconnect_serial() sets _serial=None."""
+    def test_disconnect_serial_clears_fd(self, cfs_controller):
+        """_disconnect_serial() clears the transport fd (_fd=None).
+
+        Was test_disconnect_serial_sets_serial_to_none: the v1.3.0 transport owns a reactor
+        fd (_fd), not a pyserial handle. The harness sets _fd non-None; disconnect must clear
+        it. (_serial is the test byte-transport handle and is left untouched by disconnect,
+        which no longer knows about it.)
+        """
         cfs_controller._disconnect_serial()
-        assert cfs_controller._serial is None
+        assert cfs_controller._fd is None
 
     def test_disconnect_serial_is_safe_when_already_disconnected(self, cfs_controller):
         """_disconnect_serial() is idempotent: calling twice does not raise."""
         cfs_controller._disconnect_serial()
         cfs_controller._disconnect_serial()  # second call must not raise
-        assert cfs_controller._serial is None
+        assert cfs_controller._fd is None
 
 
 # ===========================================================================
@@ -115,24 +159,24 @@ class TestLifecycleHandlers:
     def test_handle_ready_calls_connect_serial(self):
         """_handle_ready() calls _connect_serial() once."""
         cfg = _make_fake_config(auto_init=False)
-        mock_ser = mock.MagicMock()
-        mock_ser.is_open = True
-
-        with mock.patch("creality_cfs.serial.Serial", return_value=mock_ser):
-            cfs = CrealityCFS(cfg)
-            cfs._connect_serial = mock.MagicMock()
-            cfs._handle_ready()
+        cfs = CrealityCFS(cfg)
+        cfs._connect_serial = mock.MagicMock()
+        cfs._handle_ready()
 
         cfs._connect_serial.assert_called_once()
 
-    def test_handle_ready_logs_error_on_serial_exception(self):
-        """_handle_ready() logs an error but does not raise when port fails."""
+    def test_handle_ready_logs_error_on_open_failure(self):
+        """_handle_ready() logs an error but does not raise when the port fails to open.
+
+        Was test_handle_ready_logs_error_on_serial_exception. The open error now originates
+        at os.open (the v1.3.0 reactor-fd transport); _handle_ready must still swallow it so a
+        missing CFS does not stop the printer.
+        """
         import serial as serial_mod
         cfg = _make_fake_config(auto_init=False)
+        cfs = CrealityCFS(cfg)
 
-        with mock.patch("creality_cfs.serial.Serial",
-                        side_effect=serial_mod.SerialException("no port")):
-            cfs = CrealityCFS(cfg)
+        with _patch_connect_fail(serial_mod.SerialException("no port")):
             # Should not raise
             cfs._handle_ready()
 
@@ -141,13 +185,9 @@ class TestLifecycleHandlers:
     def test_handle_ready_registers_auto_init_callback_when_enabled(self):
         """_handle_ready() registers reactor callback when auto_init=True."""
         cfg = _make_fake_config(auto_init=True)
-        mock_ser = mock.MagicMock()
-        mock_ser.is_open = True
-
-        with mock.patch("creality_cfs.serial.Serial", return_value=mock_ser):
-            cfs = CrealityCFS(cfg)
-            cfs._connect_serial = mock.MagicMock()
-            cfs._handle_ready()
+        cfs = CrealityCFS(cfg)
+        cfs._connect_serial = mock.MagicMock()
+        cfs._handle_ready()
 
         cfs.reactor.register_callback.assert_called_once()
 

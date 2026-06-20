@@ -60,9 +60,15 @@ class TestSerialNotConnected:
             cfs_controller._send_command(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE)
 
     def test_send_command_raises_runtime_error_when_serial_is_none(self, cfs_controller):
-        """_send_command() raises RuntimeError when _serial is None."""
+        """_send_command() raises RuntimeError when the transport fd is gone.
+
+        v1.3.0 seam: the connected precondition is keyed on the reactor fd (_fd), which
+        the non-blocking transport owns; _serial is the test harness's byte-transport
+        handle. Clearing both models "serial gone" exactly as before.
+        """
         cfs_controller._serial = None
-        cfs_controller.is_connected = True  # logically connected but serial gone
+        cfs_controller._fd = None
+        cfs_controller.is_connected = True  # logically connected but transport gone
         with pytest.raises(RuntimeError, match="not connected"):
             cfs_controller._send_command(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE)
 
@@ -203,9 +209,10 @@ class TestRetryLogic:
         cfs, _ = make_wired_controller(hw, box_count=1, retry_count=3)
         cfs._run_auto_addressing()
 
-        # Third attempt should succeed
+        # Third attempt should succeed. Mock returns [0x1C,0x14,0x00,0x00]; per the v1.2.0
+        # wire-confirmed decode state=data[1]=0x14 (the retry succeeding is what's under test).
         result = cfs.get_box_state(0x01)
-        assert result["state"] == 0x1C
+        assert result["state"] == 0x14
 
 
 # ===========================================================================

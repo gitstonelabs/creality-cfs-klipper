@@ -6,6 +6,8 @@ in v1.1.0. These tests validate the real implementations rather than
 checking for NotImplementedError.
 """
 
+import itertools
+
 import pytest
 from unittest.mock import MagicMock, patch
 from src.creality_cfs import CrealityCFS, CMD_EXTRUDE_PROCESS, CMD_RETRUDE_PROCESS
@@ -15,11 +17,26 @@ from src.creality_cfs import CrealityCFS, CMD_EXTRUDE_PROCESS, CMD_RETRUDE_PROCE
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _stub_reactor():
+    """Return a reactor stub whose monotonic() advances 1s per call.
+
+    v1.3.0 (B1): extrude_process()'s STREAM-loop deadline was moved off time.time() onto
+    self.reactor.monotonic() (the reactor clock _send_command yields the greenlet against).
+    The bare instance built by make_cfs_with_mock_send therefore needs a reactor with a
+    monotonic() that advances so the loop terminates promptly without real sleeps.
+    """
+    reactor = MagicMock()
+    counter = itertools.count()
+    reactor.monotonic.side_effect = lambda: float(next(counter))
+    return reactor
+
+
 def make_cfs_with_mock_send(send_return=None):
     """Create a CrealityCFS instance with _send_command mocked out."""
     instance = object.__new__(CrealityCFS)
     instance._send_command = MagicMock(return_value=send_return)
     instance.is_connected = True
+    instance.reactor = _stub_reactor()
     return instance
 
 
@@ -170,23 +187,40 @@ class TestRetrudeProcess:
         cmd_code = instance._send_command.call_args[0][2]
         assert cmd_code == CMD_RETRUDE_PROCESS
 
-    def test_retrude_process_sends_correct_payload(self):
-        """Payload is [0x02, 0x01] as confirmed from live capture."""
+    def test_retrude_process_sends_correct_payload_start_phase(self):
+        """First payload is [slot, phase] = [0x02, 0x00] (start), WIRE-CONFIRMED 2026-06-09.
+
+        v1.2.0 corrected the box-controller payload from the pre-v1.2.0 [sub, slot]=[0x02,0x01]
+        to [slot_bitmask, phase] with phase 0x00 (start) issued first. The default slot is
+        SLOT_T1 (0x02). The first _send_command therefore carries b'\\x02\\x00'.
+        """
         instance = make_cfs_with_mock_send(send_return=None)
         instance.retrude_process(0x01)
-        data = instance._send_command.call_args[0][3]
-        assert data == bytes([0x02, 0x01])
+        # call_args is the LAST call; with send_return=None the start phase fails and aborts,
+        # so the only/last call is the start phase.
+        call = instance._send_command.call_args
+        data = call[1].get('data') if call[1] else call[0][3]
+        assert data == bytes([0x02, 0x00])
 
-    def test_retrude_process_is_single_command(self):
-        """Retrude is one-shot: only one _send_command call."""
+    def test_retrude_process_is_single_command_when_start_unacked(self):
+        """When the start phase is unacked, retrude aborts after one _send_command call.
+
+        v1.2.0: the box-controller form is a 2-phase sequence ([slot,0x00] then [slot,0x01]),
+        but the start phase is a prerequisite, so a missing start ACK aborts before the running
+        phase. With send_return=None that yields exactly one call.
+        """
         instance = make_cfs_with_mock_send(send_return=None)
         instance.retrude_process(0x01)
         assert instance._send_command.call_count == 1
 
-    def test_retrude_process_sends_correct_payload(self):
-        """Payload is [0x02, 0x01] as confirmed from live capture."""
-        instance = make_cfs_with_mock_send(send_return=None)
+    def test_retrude_process_sends_both_phases_when_acked(self):
+        """When both phases ACK, retrude issues start [0x02,0x00] then running [0x02,0x01].
+
+        Replaces the pre-v1.2.0 one-shot assumption with the wire-confirmed 2-phase sequence.
+        """
+        instance = make_cfs_with_mock_send(send_return={"data": b""})
         instance.retrude_process(0x01)
-        call = instance._send_command.call_args
-        data = call[1].get('data') if call[1] else call[0][3]
-        assert data == bytes([0x02, 0x01])
+        payloads = []
+        for call in instance._send_command.call_args_list:
+            payloads.append(call[1].get('data') if call[1] else call[0][3])
+        assert payloads == [bytes([0x02, 0x00]), bytes([0x02, 0x01])]

@@ -126,11 +126,26 @@ Resolved in v1.2.0:
     EXTRUDE_SETTLE_READS consecutive reads, with a path-length timeout), not a fixed count.
 """
 
-import fcntl
 import logging
 import os
 import struct
-import termios
+
+# ---------------------------------------------------------------------------
+# POSIX-only serial imports. fcntl/termios do not exist off-POSIX (e.g. the
+# Windows dev/CI box that runs the protocol unit tests). The live reactor-fd
+# transport is POSIX-only by design; guard the imports so the module still
+# IMPORTS and the class still CONSTRUCTS off-POSIX (the CRC/framing/command
+# logic is fully testable without a real fd). Opening the live serial port
+# off-POSIX raises a clear error in _connect_serial(), not at import time.
+# ---------------------------------------------------------------------------
+try:
+    import fcntl
+    import termios
+    _HAS_POSIX_SERIAL = True
+except ImportError:                 # pragma: no cover - exercised only off-POSIX
+    fcntl = None
+    termios = None
+    _HAS_POSIX_SERIAL = False
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -593,12 +608,12 @@ class CrealityCFS:
         # 1 = kernel RS-485 mode with RTS high on send (DE); 0 = RTS low on send.
         rts: int = config.getint("rts_on_send", -1, minval=-1, maxval=1)
         self.rts_on_send = None if rts < 0 else bool(rts)
-        # Map the requested baud to a termios B-constant for the raw tty config.
-        self._baud_const = getattr(termios, "B%d" % self.baud, None)
-        if self._baud_const is None:
-            raise config.error(
-                "creality_cfs: unsupported baud %d (no termios B%d)" % (self.baud, self.baud)
-            )
+        # The requested baud is mapped to a termios B-constant lazily in the connect path
+        # (_resolve_baud_const, called from _config_tty). It is NOT resolved here because
+        # termios does not exist off-POSIX and __init__ must construct on any host (the
+        # protocol/command logic is tested off-POSIX). An unsupported baud surfaces when the
+        # port is actually opened, not at construction.
+        self._baud_const = None
 
         # --- Internal state (reactor-driven, non-blocking transport; v1.3.0) ---
         self._fd: int = None                 # raw non-blocking tty file descriptor
@@ -748,8 +763,20 @@ class CrealityCFS:
 
         Raises:
             OSError: If the port cannot be opened or configured.
+            RuntimeError: If opened off-POSIX (no fcntl/termios available).
         """
-        fd = os.open(self.serial_port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        if not _HAS_POSIX_SERIAL:
+            raise RuntimeError(
+                "creality_cfs: the live RS-485 transport requires a POSIX host "
+                "(fcntl/termios); cannot open %s on this platform" % self.serial_port
+            )
+        # O_NOCTTY/O_NONBLOCK are POSIX-only os attributes; resolve them defensively so this
+        # line does not raise AttributeError off-POSIX (they are always present on the live
+        # POSIX host, where this path actually runs).
+        open_flags = (os.O_RDWR
+                      | getattr(os, "O_NOCTTY", 0)
+                      | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(self.serial_port, open_flags)
         try:
             self._config_tty(fd)
             self._config_rs485(fd)
@@ -763,8 +790,23 @@ class CrealityCFS:
         logger.info("creality_cfs: opened %s at %d baud (non-blocking, reactor fd)",
                     self.serial_port, self.baud)
 
+    def _resolve_baud_const(self):
+        """Map self.baud to a termios B-constant. POSIX-only; called from the connect path.
+
+        Resolved lazily (not in __init__) so the module constructs off-POSIX. Raises a clear
+        RuntimeError if the baud has no termios B-constant on this host.
+        """
+        baud_const = getattr(termios, "B%d" % self.baud, None)
+        if baud_const is None:
+            raise RuntimeError(
+                "creality_cfs: unsupported baud %d (no termios B%d)" % (self.baud, self.baud)
+            )
+        self._baud_const = baud_const
+        return baud_const
+
     def _config_tty(self, fd: int) -> None:
         """Put the tty in raw 8N1 mode at the configured baud (VMIN=0/VTIME=0, non-blocking)."""
+        self._resolve_baud_const()
         a = termios.tcgetattr(fd)   # [iflag, oflag, cflag, lflag, ispeed, ospeed, cc]
         a[0] = termios.IGNPAR                                   # iflag: raw, ignore parity
         a[1] = 0                                                # oflag: raw
@@ -872,28 +914,16 @@ class CrealityCFS:
             if self._shutdown:
                 return None
             for attempt in range(max(retries, 1)):
-                # Fresh completion per attempt; register it as the pending matcher BEFORE the
-                # write so a fast reply cannot race ahead of us.
-                comp = self.reactor.completion()
-                self._pending = comp
-                self._pending_match = match
-                try:
-                    os.write(self._fd, msg)
-                except OSError as exc:
-                    logger.error("creality_cfs: write error on attempt %d: %s",
-                                 attempt + 1, exc)
-                    self._pending = None
-                    self._pending_match = None
-                    break
-
-                # Park the caller (yields the greenlet) until the fd callback completes us with
-                # a frame, or the reactor timer wakes us with None at the deadline.
-                raw = comp.wait(self.reactor.monotonic() + timeout, None)
-                self._pending = None
-                self._pending_match = None
+                # One raw request/response exchange through the transport seam. _txn is the
+                # only piece that touches the fd/reactor; tests replace it to drive the
+                # protocol logic without a live port.
+                raw = self._txn(msg, timeout, match)
 
                 if self._shutdown:
                     return None
+                if raw is self._TXN_WRITE_ERROR:
+                    # Hardware-level write failure: do not keep retrying a dead bus.
+                    break
                 if raw is None or len(raw) == 0:
                     logger.debug(
                         "creality_cfs: no response on attempt %d/%d for func=0x%02X",
@@ -918,6 +948,53 @@ class CrealityCFS:
         # Addressing broadcast commands legitimately get no response if no devices are
         # present; return None instead of raising (unchanged contract).
         return None
+
+    # Sentinel returned by _txn when the write itself failed (vs. a plain no-response None),
+    # so _send_command can break the retry loop on a dead bus instead of retrying.
+    _TXN_WRITE_ERROR = object()
+
+    def _txn(self, request_bytes: bytes, timeout: float, match=None):
+        """Perform ONE raw request/response exchange over the bus (the transport seam).
+
+        This is the only method that touches the fd and the reactor. _send_command wraps it
+        with build_message, the retry loop, parse_message, and CRC validation, so the protocol
+        logic is fully exercisable by replacing _txn alone (the test harness does exactly this).
+
+        POSIX reactor-fd implementation (UNCHANGED from the v1.3.0 non-blocking transport):
+        register a fresh reactor.completion as the pending (addr, func) matcher BEFORE writing
+        so a fast reply cannot race ahead, os.write the request, then park the caller in
+        completion.wait() bounded by a reactor timer. The registered fd callback frames the
+        reply and completes the completion; this yields the greenlet instead of blocking it.
+
+        Args:
+            request_bytes: The complete framed request to write.
+            timeout: Response timeout in seconds (reactor.monotonic deadline).
+            match: Optional (addr, func) tuple the reply must echo; None matches anything.
+
+        Returns:
+            bytes: The raw response frame (HEAD..CRC).
+            None: On timeout / no response.
+            self._TXN_WRITE_ERROR: If the write itself failed (caller breaks the retry loop).
+        """
+        # Fresh completion per exchange; register it as the pending matcher BEFORE the write
+        # so a fast reply cannot race ahead of us.
+        comp = self.reactor.completion()
+        self._pending = comp
+        self._pending_match = match
+        try:
+            os.write(self._fd, request_bytes)
+        except OSError as exc:
+            logger.error("creality_cfs: write error: %s", exc)
+            self._pending = None
+            self._pending_match = None
+            return self._TXN_WRITE_ERROR
+
+        # Park the caller (yields the greenlet) until the fd callback completes us with a
+        # frame, or the reactor timer wakes us with None at the deadline.
+        raw = comp.wait(self.reactor.monotonic() + timeout, None)
+        self._pending = None
+        self._pending_match = None
+        return raw
 
     # -----------------------------------------------------------------------
     # Reactor fd read path: drain, frame, and dispatch incoming bytes

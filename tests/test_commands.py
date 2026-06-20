@@ -347,9 +347,13 @@ class TestCmdGetBoxState:
     """Tests for CMD_GET_BOX_STATE (0x0A)."""
 
     def test_cmd_get_box_state_message_matches_capture(self):
-        """GET_BOX_STATE slave 1 matches captured b'\xf7\x01\x03\xff\x08\x52'."""
+        """GET_BOX_STATE slave 1 matches captured b'\xf7\x01\x03\xff\x0a\x5c'.
+
+        Func 0x0A (WIRE-CONFIRMED 2026-06-09/06-19); the prior \x08\x52 frame was stale from
+        the pre-v1.2.0 model. 0x08 is GET_HARDWARE_STATUS, a separate command.
+        """
         msg = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE)
-        assert msg == b'\xf7\x01\x03\xff\x08\x52'
+        assert msg == b'\xf7\x01\x03\xff\x0a\x5c'
 
 
     def test_cmd_get_box_state_no_data_payload(self):
@@ -359,17 +363,20 @@ class TestCmdGetBoxState:
         assert len(msg) == 6
 
     def test_cmd_get_box_state_parses_4_byte_response(self, cfs_controller):
-        """get_box_state() parses 4-byte response and returns state, raw, addr.
+        """get_box_state() parses the 0x0A state word and returns state, raw, addr.
 
         Captured response: b'\\xf7\\x01\\x07\\x00\\x0a\\x1c\\x14\\x00\\x00\\x48'
-        data = b'\\x1c\\x14\\x00\\x00', state = 0x1C
+        data = b'\\x1c\\x14\\x00\\x00'. Per the v1.2.0 wire-confirmed decode the word is
+        [class_byte=data[0]][state=data[1]], so class_byte=0x1C and state=0x14 (the lo byte).
+        The pre-v1.2.0 model read state from data[0] (0x1C); that was corrected from the wire.
         """
         resp = b'\xf7\x01\x07\x00\x0a\x1c\x14\x00\x00\x48'
         cfs_controller._serial.response_queue.append(resp[:3])
         cfs_controller._serial.response_queue.append(resp[3:])
 
         result = cfs_controller.get_box_state(0x01)
-        assert result["state"] == 0x1C
+        assert result["state"] == 0x14         # lo byte (data[1]) is the meaningful state
+        assert result["class_byte"] == 0x1C    # hi/class byte (data[0])
         assert result["raw"] == b'\x1c\x14\x00\x00'
         assert result["addr"] == 0x01
 
