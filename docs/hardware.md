@@ -79,33 +79,33 @@ Top row = pins 1-3, bottom row = pins 4-6.
 
 ## Daisy-Chain Topology
 
-The CFS uses a true RS485 daisy-chain. Each CFS box has two 6-pin ports
-(IN and OUT). The filament buffer sits at the end of the chain as the terminator.
+The CFS uses a true RS485 daisy-chain. Each CFS box has two 6-pin ports (IN and
+OUT). RS485 data (pins 1/5/6) runs the length of the chain. A single filament
+buffer sits at the very end of the chain.
 
 ```
-Printer (1x 6-pin OUT)
-    │
-    ├── Pin 1 (A) ─────────────────────────────────────────┐
-    ├── Pin 5 (GND) ─────────────────────────────────────┐ │
-    └── Pin 6 (B) ──────────────────────────────────────┐│ │
-                                                         ││ │
-CFS Box 1 port1 (IN) ← pins 1,5,6                       ││ │
-CFS Box 1 port2 (OUT) → CFS Box 2 port1 (IN) → ...      ││ │
-    │                                                    ││ │
-    └── Buffer switch (pins 2,3) ───► Printer GPIO ──────┘│ │
-                                                          │ │
-CFS Box 2 port2 (OUT) → CFS Box 3 → CFS Box 4           │ │
-    │                                                    │ │
-    └── Buffer switch (pins 2,3) ───► independent GPIO ──┘ │
-                                                           │
-Filament Buffer (terminator, 1x 6-pin IN)                 │
-    └── Termination resistor ──────────────────────────────┘
+Host (USB-RS485 dongle = pins 1/5/6 only, or a mainboard 6-pin port)
+   |  RS485  A / GND / B
+   v
+CFS Box 1  IN -> OUT  -->  CFS Box 2  IN -> OUT  -->  ...  -->  Filament Buffer (end of chain)
 ```
 
-**Key point:** Buffer switch signals on pins 2/3 are per-segment and independent.
-The Printer→CFS1 link carries CFS1's buffer state. The CFS1→CFS2 link carries
-CFS2's buffer state. Each requires its own GPIO input on the host if you want to
-monitor all segments independently.
+**Buffer wiring: one buffer, one GPIO.** Creality ships a single filament buffer
+at the end of the chain. Its state is a plain mechanical switch on pin 2,
+referenced to pin 5 (GND). It is NOT carried over RS485, so a 3-wire USB-RS485
+dongle (A/B/GND) does not see it. Read it by tapping pin 2 and pin 5 off a CFS
+6-pin connector and wiring them to ONE host GPIO input. For a single box, pin 2
+at the host-side (CFS Box 1 IN) connector carries the buffer state, which the
+"from printer end" resistance reading above confirms. You do not need a buffer
+per box, and a single buffer needs only one GPIO.
+
+**Unconfirmed, needs a multi-box probe.** An earlier version of this page said the
+pin-2 signal is "per segment," meaning each cable carries a different box's buffer
+and you need one GPIO per box. That was inferred from a SINGLE-box Hi capture and
+is not confirmed on a real multi-box chain. If you run more than one box, power the
+chain and probe pin 2 against pin 5 on each cable while triggering each box's buffer
+by hand to see which segment responds. If it differs from the single-buffer-at-the-
+end model above, please open an issue; that is data we do not have yet.
 
 ---
 
@@ -134,7 +134,9 @@ vary between manufacturers and the labeling can be misleading.
 
 ## Buffer Switch GPIO Wiring
 
-The filament buffer signals require a separate GPIO connection, independent of RS485:
+The single filament buffer at the end of the chain reports its state on a separate
+GPIO line, independent of RS485. One GPIO covers it. Tap pin 2 and pin 5 off a CFS
+6-pin connector (a 3-wire USB-RS485 dongle does not break these out):
 
 | CFS Connector | Wire | Connect to |
 |--------------|------|-----------|
@@ -143,6 +145,8 @@ The filament buffer signals require a separate GPIO connection, independent of R
 
 Pin 3 (black) is the inverted pair of pin 2; only one is needed.
 Pin 2 goes HIGH (3.3V) when the buffer is triggered (filament present/tension).
+The line is 3.3V logic, so use a 3.3V input. Pi and Jetson GPIO and most toolhead
+MCU pins are 3.3V and fine; do not feed 5V into it.
 
 **Klipper config:**
 ```ini
@@ -154,6 +158,9 @@ runout_gcode:
 insert_gcode:
     RESPOND MSG="CFS buffer released"
 ```
+
+If the sensor reads inverted, flip the pin polarity with `!` (pin 2 idles near 0V
+and goes to 3.3V when triggered). Set it to match what you measure.
 
 Suitable GPIO pins:
 - BTT EBB42 Gen2: `EBB:PA2` (ENDSTOP port) or `EBB:PA4` (PROBE SERVOS pin)

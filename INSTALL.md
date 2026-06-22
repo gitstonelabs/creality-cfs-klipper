@@ -133,21 +133,21 @@ flowchart LR
 
 ### Optional: buffer-empty sensor
 
-The CFS has a mechanical switch that closes when the buffer is empty. Wire it as a GPIO input to your host or toolhead board for filament-runout detection. It's **not** routed over RS485.
+There is a single filament buffer at the end of the chain. It reports its state with a plain mechanical switch on pin 2 (referenced to pin 5 GND), going to 3.3V when triggered. It is **not** routed over RS485, and a 3-wire USB-RS485 dongle does not break out pin 2, so tap pin 2 and pin 5 off a CFS 6-pin connector and wire them to one 3.3V host GPIO input for buffer or runout detection. One buffer needs one GPIO; you do not need a buffer per box.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{
   'background':'#0a1428','primaryColor':'#1a2a44','primaryTextColor':'#e0f7ff',
   'primaryBorderColor':'#00d4ff','lineColor':'#4dd0e1'}}}%%
 flowchart LR
-    P2["CFS Pin 2<br/>Buffer switch"] --> GPIO["Host GPIO<br/>(pull-up, active-low)"]
+    P2["CFS Pin 2<br/>Buffer switch"] --> GPIO["Host GPIO<br/>(3.3V input)"]
     P5["CFS Pin 5<br/>GND"] --- GND2["Host GND"]
 ```
 
 In `printer.cfg`:
 ```ini
 [filament_switch_sensor cfs_buffer]
-switch_pin: ^EBB:PA2     # or any pulled-up GPIO input
+switch_pin: ^EBB:PA2     # any 3.3V GPIO; add ! to invert if it reads backwards
 pause_on_runout: false   # we just want logging, not auto-pause
 ```
 
@@ -339,7 +339,7 @@ Re-run `CFS_INIT` any time you change the chain order or hot-swap a box.
 
 ### Bus terminator
 
-For chains longer than ~2 metres, add a 120 Ω termination resistor across A/B at the far end (after Box N). Short chains (single box) usually don't need it but adding one rarely hurts.
+Most USB-RS485 adapters provide their own A/B bias and termination, so you usually do not need to add a resistor. The common Waveshare USB-RS485 is just A, B, and GND and handles this itself. Some Pi and Jetson RS485 HATs have a 120 Ω jumper, but on those it is often for the CAN side, so check the board before enabling it. If the bus is flaky on a long chain (more than ~2 m), add a 120 Ω resistor across A/B at the far end, after the last box. Short or single-box chains generally do not need one.
 
 ---
 
