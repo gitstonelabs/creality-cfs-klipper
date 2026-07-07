@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 test_errors.py: Error handling and failure path tests for CrealityCFS.
 
 Tests cover:
   - Timeout: serial returns nothing, handler deals gracefully
   - Retry: fail N times then succeed
-  - Retry exhaustion: all retries fail, correct exception raised
+  - Retry exhaustion: all retries fail, None returned (v1.4.0: get_box_state is
+    silent-CFS tolerant and returns None instead of raising RuntimeError)
   - CRC mismatch in response: rejected and retried
   - Malformed response: too short, wrong header
   - Serial not connected: RuntimeError before any I/O
@@ -106,14 +108,15 @@ class TestTimeoutNoResponse:
         )
         assert result is None
 
-    def test_timeout_operational_command_raises_runtime_error(self, cfs_controller):
-        """get_box_state() raises RuntimeError when response never arrives.
+    def test_timeout_operational_command_returns_none(self, cfs_controller):
+        """get_box_state() returns None when the response never arrives.
 
-        Operational commands require a response; silence is a protocol error.
+        v1.4.0: silence is no longer a raise. The first 0x0A after a quiet period
+        legitimately returns None on real hardware (the box slave-MCU wake), so a
+        missing box must never abort a caller mid-choreography with RuntimeError.
         """
         # Empty queue
-        with pytest.raises(RuntimeError, match="No response"):
-            cfs_controller.get_box_state(0x01)
+        assert cfs_controller.get_box_state(0x01) is None
 
     def test_timeout_no_response_write_still_called(self, cfs_controller):
         """Even on timeout, _send_command() writes the command to serial."""
@@ -125,14 +128,16 @@ class TestTimeoutNoResponse:
         assert cfs_controller._serial.write.called
 
     def test_timeout_with_mock_hw_inject_timeout(self):
-        """MockCFSHardware.inject_error(ERROR_TIMEOUT) causes _send_command to return None."""
+        """MockCFSHardware.inject_error(ERROR_TIMEOUT) causes get_box_state to return None.
+
+        v1.4.0: get_box_state no longer raises RuntimeError on silence.
+        """
         hw = MockCFSHardware(box_count=1)
         hw.inject_error(MockCFSHardware.ERROR_TIMEOUT, on_command=CMD_GET_BOX_STATE)
         cfs, _ = make_wired_controller(hw, box_count=1, retry_count=1)
         cfs._run_auto_addressing()
 
-        with pytest.raises(RuntimeError, match="No response"):
-            cfs.get_box_state(0x01)
+        assert cfs.get_box_state(0x01) is None
 
 
 # ===========================================================================
@@ -209,10 +214,14 @@ class TestRetryLogic:
         cfs, _ = make_wired_controller(hw, box_count=1, retry_count=3)
         cfs._run_auto_addressing()
 
-        # Third attempt should succeed. Mock returns [0x1C,0x14,0x00,0x00]; per the v1.2.0
-        # wire-confirmed decode state=data[1]=0x14 (the retry succeeding is what's under test).
+        # Third attempt should succeed (the retry succeeding is what's under test).
+        # v1.4.0: mock returns [0x1C,0x24,0x00,0x00]; b0/b1 are the opaque fw_base and
+        # d3=0x00 means feed mode (the old state/data[1] decode is wire-disproven).
         result = cfs.get_box_state(0x01)
-        assert result["state"] == 0x14
+        assert result is not None
+        assert result["fw_base"] == 0x1C24
+        assert result["feeding"] is True
+        assert result["loaded"] is False
 
 
 # ===========================================================================
@@ -241,15 +250,18 @@ class TestCRCMismatchResponse:
         assert result is None
 
     def test_crc_mismatch_via_mock_hw_inject_crc_error(self):
-        """MockCFSHardware.inject_error(ERROR_CRC) triggers CRC mismatch rejection."""
+        """MockCFSHardware.inject_error(ERROR_CRC) triggers CRC mismatch rejection.
+
+        v1.4.0: with 1 retry and 1 CRC error the corrupt frame is still rejected by
+        _send_command, but get_box_state now reports the exhausted retries as None
+        instead of raising RuntimeError.
+        """
         hw = MockCFSHardware(box_count=1)
         hw.inject_error(MockCFSHardware.ERROR_CRC, on_command=CMD_GET_BOX_STATE)
         cfs, _ = make_wired_controller(hw, box_count=1, retry_count=1)
         cfs._run_auto_addressing()
 
-        # With 1 retry and 1 CRC error, get_box_state should raise RuntimeError
-        with pytest.raises(RuntimeError, match="No response"):
-            cfs.get_box_state(0x01)
+        assert cfs.get_box_state(0x01) is None
 
 
 # ===========================================================================
@@ -309,24 +321,30 @@ class TestMalformedResponse:
         assert result is None
 
     def test_malformed_garbage_response_via_inject(self):
-        """MockCFSHardware.inject_error(ERROR_GARBAGE) causes response rejection."""
+        """MockCFSHardware.inject_error(ERROR_GARBAGE) causes response rejection.
+
+        v1.4.0: the garbage frame is still rejected, but the exhausted retries now
+        surface as None from get_box_state (no more RuntimeError).
+        """
         hw = MockCFSHardware(box_count=1)
         hw.inject_error(MockCFSHardware.ERROR_GARBAGE, on_command=CMD_GET_BOX_STATE)
         cfs, _ = make_wired_controller(hw, box_count=1, retry_count=1)
         cfs._run_auto_addressing()
 
-        with pytest.raises(RuntimeError):
-            cfs.get_box_state(0x01)
+        assert cfs.get_box_state(0x01) is None
 
     def test_malformed_truncated_response_via_inject(self):
-        """MockCFSHardware.inject_error(ERROR_TRUNCATED) causes response rejection."""
+        """MockCFSHardware.inject_error(ERROR_TRUNCATED) causes response rejection.
+
+        v1.4.0: the truncated frame is still rejected, but the exhausted retries now
+        surface as None from get_box_state (no more RuntimeError).
+        """
         hw = MockCFSHardware(box_count=1)
         hw.inject_error(MockCFSHardware.ERROR_TRUNCATED, on_command=CMD_GET_BOX_STATE)
         cfs, _ = make_wired_controller(hw, box_count=1, retry_count=1)
         cfs._run_auto_addressing()
 
-        with pytest.raises(RuntimeError):
-            cfs.get_box_state(0x01)
+        assert cfs.get_box_state(0x01) is None
 
 
 # ===========================================================================

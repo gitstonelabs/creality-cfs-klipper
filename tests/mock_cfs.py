@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 mock_cfs.py: MockCFSHardware simulator for CFS RS485 protocol testing.
 
@@ -16,6 +17,8 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
+import struct
+
 from creality_cfs import (
     crc8_cfs,
     build_message,
@@ -32,6 +35,15 @@ from creality_cfs import (
     CMD_GET_BOX_STATE,
     CMD_SET_PRE_LOADING,
     CMD_GET_VERSION_SN,
+    CMD_GET_HARDWARE_STATUS,
+    CMD_CUT_STATE,
+    CMD_MEASURING_WHEEL,
+    CMD_CTRL_CONNECTION_MOTOR_ACTION,
+    CMD_EXTRUDE_PROCESS,
+    CMD_RETRUDE_PROCESS,
+    CMD_GET_FILAMENT_SENSOR_STATE,
+    CMD_GET_REMAIN_LEN,
+    EXTRUDE_SUB_PUSH,
     DEV_TYPE_MB,
     MIN_MSG_LEN,
 )
@@ -90,6 +102,10 @@ class MockCFSHardware:
         self._addressed = [False] * box_count   # has received SET_SLAVE_ADDR
         self._modes = [0x00] * box_count         # current box mode
         self._pre_loading = [0x00] * box_count  # pre-loading slot mask
+        # v1.4.0 choreography state:
+        self._loaded = [False] * box_count      # box in print-mode (0x0A data[3] == 0x02)
+        self._wheel_mm = [-100.0] * box_count   # measuring wheel (negative, grows in magnitude)
+        self._wheel_step = 300.0                # magnitude advance per 0x05 push / 0x0E read
 
         # Discovery queue: each GET_SLAVE_INFO returns one box, FIFO
         self._discovery_queue = list(range(box_count))
@@ -167,6 +183,22 @@ class MockCFSHardware:
             return self._resp_set_pre_loading(addr, data)
         elif func == CMD_GET_VERSION_SN:
             return self._resp_get_version_sn(addr, data)
+        elif func == CMD_GET_HARDWARE_STATUS:
+            return self._resp_get_hardware_status(addr, data)
+        elif func == CMD_CUT_STATE:
+            return self._resp_cut_state(addr, data)
+        elif func == CMD_MEASURING_WHEEL:
+            return self._resp_measuring_wheel(addr, data)
+        elif func == CMD_CTRL_CONNECTION_MOTOR_ACTION:
+            return self._resp_motor_action(addr, data)
+        elif func == CMD_EXTRUDE_PROCESS:
+            return self._resp_extrude(addr, data)
+        elif func == CMD_RETRUDE_PROCESS:
+            return self._resp_retrude(addr, data)
+        elif func == CMD_GET_FILAMENT_SENSOR_STATE:
+            return self._resp_read_material(addr, data)
+        elif func == CMD_GET_REMAIN_LEN:
+            return self._resp_read_remain(addr, data)
         else:
             # Unknown command: return None (no response)
             return None
@@ -224,22 +256,36 @@ class MockCFSHardware:
         return build_message(addr, STATUS_ADDRESSING, CMD_GET_ADDR_TABLE, resp_data)
 
     def _resp_set_box_mode(self, addr, data):
-        """CMD_SET_BOX_MODE: apply mode and return ACK."""
+        """CMD_SET_BOX_MODE: apply mode and return ACK.
+
+        Two wire forms: [0x00][slot] = enter feed mode (clears the loaded flag);
+        [slot][0x00] with slot a 1-hot bitmask = per-slot PRINT mode (sets the loaded
+        flag -- GET_BOX_STATE data[3] then reads 0x02, mirroring the real box).
+        """
         slot = addr - 1
         if 0 <= slot < self.box_count and len(data) >= 1:
             self._modes[slot] = data[0]
+            if len(data) >= 2:
+                if data[0] == 0x00:
+                    self._loaded[slot] = False          # enter feed/change mode
+                elif data[0] in (0x01, 0x02, 0x04, 0x08) and data[1] == 0x00:
+                    self._loaded[slot] = True           # per-slot print mode
         # Exact ACK captured: b'\xf7\x01\x03\x00\x04\xa1'
         return build_message(addr, STATUS_ADDRESSING, CMD_SET_BOX_MODE)
 
     def _resp_get_box_state(self, addr, data):
-        """CMD_GET_BOX_STATE: return 4-byte state response."""
+        """CMD_GET_BOX_STATE: return the 4-byte state word.
+
+        v1.4.0 decode: data = [b0][b1][b2][b3] where b0/b1 are an opaque firmware base
+        (this mock uses 0x1C24, one of the observed real bases), b2 = substatus 0x00 and
+        b3 = the real load flag (0x02 loaded/print-locked, 0x00 feed mode). The mock
+        tracks per-box loaded state via SET_BOX_MODE print-mode frames / set_loaded().
+        """
         slot = addr - 1
         if not (0 <= slot < self.box_count):
             return None
-        # Captured: b'\xf7\x01\x07\x00\x0a\x1c\x14\x00\x00\x48'
-        # data = [0x1C, 0x14, 0x00, 0x00] (4 bytes)
-        state_byte = 0x1C  # nominal operational state
-        resp_data = bytes([state_byte, 0x14, 0x00, 0x00])
+        b3 = 0x02 if self._loaded[slot] else 0x00
+        resp_data = bytes([0x1C, 0x24, 0x00, b3])
         return build_message(addr, STATUS_ADDRESSING, CMD_GET_BOX_STATE, resp_data)
 
     def _resp_set_pre_loading(self, addr, data):
@@ -260,6 +306,87 @@ class MockCFSHardware:
             version_bytes = version_bytes + b"\x00" * (22 - len(version_bytes))
         # Captured: b'\xf7\x01\x19\x00\x14\x31\x31\x30\x31\x30\x30\x30\x30\x38\x34\x33\x32\x31\x35\x42\x36\x32\x35\x41\x48\x53\x43\x84'
         return build_message(addr, STATUS_ADDRESSING, CMD_GET_VERSION_SN, version_bytes[:22])
+
+    # ---- v1.4.0 choreography response builders ----
+
+    def _resp_get_hardware_status(self, addr, data):
+        """CMD_GET_HARDWARE_STATUS: return the idle/global flag byte 0x01."""
+        slot = addr - 1
+        if not (0 <= slot < self.box_count):
+            return None
+        return build_message(addr, STATUS_ADDRESSING, CMD_GET_HARDWARE_STATUS,
+                             bytes([0x01]))
+
+    def _resp_cut_state(self, addr, data):
+        """CMD_CUT_STATE: return 0x00 (cut OK)."""
+        slot = addr - 1
+        if not (0 <= slot < self.box_count):
+            return None
+        return build_message(addr, STATUS_ADDRESSING, CMD_CUT_STATE, bytes([0x00]))
+
+    def _wheel_word(self, slot):
+        """The current wheel value as the BE IEEE-754 float word the wire carries."""
+        return struct.pack(">f", self._wheel_mm[slot])
+
+    def _resp_measuring_wheel(self, addr, data):
+        """CMD_MEASURING_WHEEL: return the BE float wheel word, advancing per read
+        (negative value growing in magnitude, like a feeding box)."""
+        slot = addr - 1
+        if not (0 <= slot < self.box_count):
+            return None
+        self._wheel_mm[slot] -= self._wheel_step
+        return build_message(addr, STATUS_ADDRESSING, CMD_MEASURING_WHEEL,
+                             self._wheel_word(slot))
+
+    def _resp_motor_action(self, addr, data):
+        """CMD_CTRL_CONNECTION_MOTOR_ACTION: bare ACK."""
+        slot = addr - 1
+        if not (0 <= slot < self.box_count):
+            return None
+        return build_message(addr, STATUS_ADDRESSING,
+                             CMD_CTRL_CONNECTION_MOTOR_ACTION)
+
+    def _resp_extrude(self, addr, data):
+        """CMD_EXTRUDE_PROCESS: ACK each stage; a 0x05 push reply carries the wheel
+        float (advancing ~300/push), the other stages a bare ACK -- the v1.4.0 wire
+        model."""
+        slot = addr - 1
+        if not (0 <= slot < self.box_count):
+            return None
+        if len(data) >= 2 and data[1] == EXTRUDE_SUB_PUSH:
+            self._wheel_mm[slot] -= self._wheel_step
+            return build_message(addr, STATUS_ADDRESSING, CMD_EXTRUDE_PROCESS,
+                                 self._wheel_word(slot))
+        return build_message(addr, STATUS_ADDRESSING, CMD_EXTRUDE_PROCESS)
+
+    def _resp_retrude(self, addr, data):
+        """CMD_RETRUDE_PROCESS: the bare status-0x00 ACK BOTH frames get on the wire.
+        A FINISH frame ([slot][0x01]) clears the loaded flag (slot emptied)."""
+        slot = addr - 1
+        if not (0 <= slot < self.box_count):
+            return None
+        if len(data) >= 2 and data[1] == 0x01:
+            self._loaded[slot] = False
+        return build_message(addr, STATUS_ADDRESSING, CMD_RETRUDE_PROCESS)
+
+    def _resp_read_material(self, addr, data):
+        """CMD_GET_FILAMENT_SENSOR_STATE (0x02): the ASCII per-slot material map."""
+        slot = addr - 1
+        if not (0 <= slot < self.box_count):
+            return None
+        return build_message(addr, STATUS_ADDRESSING, CMD_GET_FILAMENT_SENSOR_STATE,
+                             b"A:unknown;B:none;C:none;D:none;")
+
+    def _resp_read_remain(self, addr, data):
+        """CMD_GET_REMAIN_LEN (0x03): positional 4-byte reply with 0xFF sentinels for
+        slots not selected in the request mask; slot A present at 100."""
+        slot = addr - 1
+        if not (0 <= slot < self.box_count):
+            return None
+        mask = data[0] if len(data) >= 1 else 0x0F
+        values = [0x64, 0x00, 0x00, 0x00]      # A present (100%), B-D empty
+        resp = bytes([values[i] if (mask & (1 << i)) else 0xFF for i in range(4)])
+        return build_message(addr, STATUS_ADDRESSING, CMD_GET_REMAIN_LEN, resp)
 
     # -----------------------------------------------------------------------
     # Error injection
@@ -304,9 +431,15 @@ class MockCFSHardware:
         self._addressed = [False] * self.box_count
         self._modes = [0x00] * self.box_count
         self._pre_loading = [0x00] * self.box_count
+        self._loaded = [False] * self.box_count
+        self._wheel_mm = [-100.0] * self.box_count
         self._discovery_queue = list(range(self.box_count))
         self._error_injections.clear()
         self._received.clear()
+
+    def set_loaded(self, slot_index, loaded=True):
+        """Force the loaded/print-locked flag for a box (GET_BOX_STATE data[3])."""
+        self._loaded[slot_index] = bool(loaded)
 
     def reset_discovery_queue(self):
         """Repopulate the discovery queue without clearing other state."""

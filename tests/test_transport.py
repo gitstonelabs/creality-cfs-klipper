@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 test_transport.py: Genuine behavior tests for the v1.3.0 (B1) reactor-fd serial
-transport in creality_cfs.py.
+transport in creality_cfs.py (payloads/decodes updated to the v1.4.0 wire truth).
 
 The B1 rewrite moved the live serial I/O off blocking pyserial onto a non-blocking
 reactor-fd model. The protocol logic in _send_command drives that I/O through the
@@ -60,9 +61,13 @@ from creality_cfs import (
     ADDR_BUFFER_NODE,
     SLOT_T0,
     SLOT_T1,
-    BOX_STATE_CLASS_BYTE,
-    BOX_STATE_LO_LOADED,
-    BOX_STATE_LO_FEEDING,
+    # v1.4.0: BOX_STATE_CLASS_BYTE / BOX_STATE_LO_* are gone -- the [hi=0x1a][lo] decode
+    # is wire-disproven; the load flag is data[3] (LOADED_B3/FEEDING_B3).
+    BOX_STATE_LOADED_B3,
+    BOX_STATE_FEEDING_B3,
+    BOX_EVENT_BUSY,
+    PRELOAD_MASK_ALL,
+    PRELOAD_PHASE_ARM,
     CUT_STATE_DONE,
     CUT_STATE_SET,
     MOTOR_ACTION_ENGAGE,
@@ -158,7 +163,9 @@ class FakeReactor:
     def unregister_fd(self, handle):
         self.unregister_called = True
 
-    def register_callback(self, cb):
+    def register_callback(self, cb, waketime=None):
+        # v1.4.0: the connect probe registers with an explicit waketime, so the real
+        # reactor signature (cb) OR (cb, waketime) must both be accepted here.
         return None
 
 
@@ -308,6 +315,13 @@ def _bare_cfs(baud=230400, rts=-1):
 def _good_frame(addr, func, data=b""):
     """Build a CRC-valid response frame the transport will accept."""
     return build_message(addr, STATUS_ADDRESSING, func, data)
+
+
+# v1.4.0 wire-real GET_BOX_STATE payload: 4 bytes [fw_hi][fw_lo][substatus][b3].
+# b0/b1 are an OPAQUE drifting firmware base (0x1C24 is one observed value) and b3 is
+# the real load flag; the old 2-byte [0x1A][0x20] class/lo payload is wire-disproven.
+BOX_STATE_PAYLOAD_LOADED = bytes([0x1C, 0x24, 0x00, BOX_STATE_LOADED_B3])
+BOX_STATE_PAYLOAD_FEEDING = bytes([0x1C, 0x24, 0x00, BOX_STATE_FEEDING_B3])
 
 
 # ===========================================================================
@@ -512,7 +526,7 @@ class TestTxn:
         This exercises _txn + _handle_readable + _parse_rx + _dispatch_rx together.
         """
         cfs = _bare_cfs()
-        frame = _good_frame(0x01, CMD_GET_BOX_STATE, bytes([0x1A, 0x20]))
+        frame = _good_frame(0x01, CMD_GET_BOX_STATE, BOX_STATE_PAYLOAD_LOADED)
         order = []
 
         # os.write drives the fd readable callback so the response arrives "during" the txn,
@@ -533,7 +547,8 @@ class TestTxn:
              mock.patch.object(creality_cfs, "termios", fake_t), \
              mock.patch.object(creality_cfs, "fcntl", fake_f):
             cfs._connect_serial()
-            req = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE, bytes([0x00]))
+            # v1.4.0: the 0x0A request payload is EMPTY (the old param byte is wire-disproven).
+            req = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE, b"")
             raw = cfs._txn(req, timeout=0.1, match=(0x01, CMD_GET_BOX_STATE))
 
         assert raw == frame
@@ -544,7 +559,7 @@ class TestTxn:
 
     def test_writes_the_request_bytes(self):
         cfs = _bare_cfs()
-        frame = _good_frame(0x01, CMD_GET_BOX_STATE, bytes([0x1A, 0x20]))
+        frame = _good_frame(0x01, CMD_GET_BOX_STATE, BOX_STATE_PAYLOAD_LOADED)
         sink = []
 
         def driving_write(fd, data):
@@ -561,7 +576,8 @@ class TestTxn:
              mock.patch.object(creality_cfs, "termios", fake_t), \
              mock.patch.object(creality_cfs, "fcntl", fake_f):
             cfs._connect_serial()
-            req = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE, bytes([0x00]))
+            # v1.4.0: the 0x0A request payload is EMPTY (the old param byte is wire-disproven).
+            req = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE, b"")
             cfs._txn(req, timeout=0.1, match=(0x01, CMD_GET_BOX_STATE))
 
         assert sink == [req]
@@ -578,7 +594,8 @@ class TestTxn:
              mock.patch.object(creality_cfs, "termios", fake_t), \
              mock.patch.object(creality_cfs, "fcntl", fake_f):
             cfs._connect_serial()
-            req = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE, bytes([0x00]))
+            # v1.4.0: the 0x0A request payload is EMPTY (the old param byte is wire-disproven).
+            req = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE, b"")
             raw = cfs._txn(req, timeout=0.05, match=(0x01, CMD_GET_BOX_STATE))
 
         assert raw is None
@@ -597,7 +614,8 @@ class TestTxn:
              mock.patch.object(creality_cfs, "termios", fake_t), \
              mock.patch.object(creality_cfs, "fcntl", fake_f):
             cfs._connect_serial()
-            req = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE, bytes([0x00]))
+            # v1.4.0: the 0x0A request payload is EMPTY (the old param byte is wire-disproven).
+            req = build_message(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE, b"")
             raw = cfs._txn(req, timeout=0.1, match=(0x01, CMD_GET_BOX_STATE))
 
         assert raw is cfs._TXN_WRITE_ERROR
@@ -621,7 +639,7 @@ class TestReadPath:
 
     def test_complete_frame_in_one_read_completes_pending(self):
         cfs = _bare_cfs()
-        frame = _good_frame(0x01, CMD_GET_BOX_STATE, bytes([0x1A, 0x20]))
+        frame = _good_frame(0x01, CMD_GET_BOX_STATE, BOX_STATE_PAYLOAD_LOADED)
         comp = self._armed(cfs, (0x01, CMD_GET_BOX_STATE))
         fake_os = make_fake_os(read_chunks=[frame])
         with mock.patch.object(creality_cfs, "os", fake_os):
@@ -657,7 +675,7 @@ class TestReadPath:
     def test_bad_length_byte_resyncs_to_next_header(self):
         """A 0xF7 with an implausible LEN is skipped; the real frame after it completes."""
         cfs = _bare_cfs()
-        good = _good_frame(0x01, CMD_GET_BOX_STATE, bytes([0x1A, 0x20]))
+        good = _good_frame(0x01, CMD_GET_BOX_STATE, BOX_STATE_PAYLOAD_LOADED)
         # Leading noise: a stray 0xF7 with an impossible LEN field (0xFF > MAX_DATA_LEN+3),
         # then the genuine frame. The parser must resync past the bad header byte.
         noisy = bytes([PACK_HEAD, 0x01, 0xFF]) + good
@@ -682,7 +700,7 @@ class TestReadPath:
     def test_unmatched_addr_frame_is_dropped(self):
         """A correctly framed reply from a DIFFERENT address must not complete us."""
         cfs = _bare_cfs()
-        wrong = _good_frame(0x02, CMD_GET_BOX_STATE, bytes([0x1A, 0x20]))
+        wrong = _good_frame(0x02, CMD_GET_BOX_STATE, BOX_STATE_PAYLOAD_LOADED)
         comp = self._armed(cfs, (0x01, CMD_GET_BOX_STATE))  # we want addr 0x01
         fake_os = make_fake_os(read_chunks=[wrong])
         with mock.patch.object(creality_cfs, "os", fake_os):
@@ -704,7 +722,7 @@ class TestReadPath:
     def test_frame_arriving_with_no_pending_is_dropped_silently(self):
         """A late/unsolicited frame with no waiter is dropped without error."""
         cfs = _bare_cfs()
-        frame = _good_frame(0x01, CMD_GET_BOX_STATE, bytes([0x1A, 0x20]))
+        frame = _good_frame(0x01, CMD_GET_BOX_STATE, BOX_STATE_PAYLOAD_LOADED)
         cfs._pending = None
         cfs._pending_match = None
         cfs._rx_buf = bytearray()
@@ -839,21 +857,48 @@ class TestPublicApiThroughRealTransport:
             return call()
 
     def test_get_box_state_decodes_loaded(self):
+        # v1.4.0: the load flag is data[3]==0x02; b0/b1 are an opaque fw base (the old
+        # [hi][lo] state/state_str/class_byte decode is wire-disproven and gone).
         cfs = _bare_cfs()
-        frame = _good_frame(0x01, CMD_GET_BOX_STATE,
-                            bytes([BOX_STATE_CLASS_BYTE, BOX_STATE_LO_LOADED]))
+        frame = _good_frame(0x01, CMD_GET_BOX_STATE, BOX_STATE_PAYLOAD_LOADED)
         result = self._run(cfs, frame, lambda: cfs.get_box_state(0x01))
-        assert result["state"] == BOX_STATE_LO_LOADED
-        assert result["state_str"] == "LOADED"
-        assert result["class_byte"] == BOX_STATE_CLASS_BYTE
+        assert result["loaded"] is True
+        assert result["feeding"] is False
+        assert result["fw_base"] == 0x1C24     # diagnostics only, never gated on
+        assert result["substatus"] == 0x00
         assert result["addr"] == 0x01
+        assert result["raw"] == BOX_STATE_PAYLOAD_LOADED
 
     def test_get_box_state_decodes_feeding(self):
+        # v1.4.0: feed/change mode is data[3]==0x00.
         cfs = _bare_cfs()
-        frame = _good_frame(0x01, CMD_GET_BOX_STATE,
-                            bytes([BOX_STATE_CLASS_BYTE, BOX_STATE_LO_FEEDING]))
+        frame = _good_frame(0x01, CMD_GET_BOX_STATE, BOX_STATE_PAYLOAD_FEEDING)
         result = self._run(cfs, frame, lambda: cfs.get_box_state(0x01))
-        assert result["state_str"] == "FEEDING"
+        assert result["feeding"] is True
+        assert result["loaded"] is False
+
+    def test_get_box_state_short_payload_returns_none(self):
+        # v1.4.0: a payload under 4 bytes (the old wire-disproven 2-byte shape included)
+        # is rejected as None instead of being mis-decoded.
+        cfs = _bare_cfs()
+        frame = _good_frame(0x01, CMD_GET_BOX_STATE, bytes([0x1A, 0x20]))
+        result = self._run(cfs, frame, lambda: cfs.get_box_state(0x01))
+        assert result is None
+
+    def test_get_box_state_no_response_returns_none(self):
+        # v1.4.0: no response returns None (it no longer raises RuntimeError), so a
+        # silent box can never abort a caller mid-choreography.
+        cfs = _bare_cfs()
+        fake_os = make_fake_os(open_fd=11)      # writes succeed, nothing ever answers
+        fake_t = make_fake_termios()
+        fake_f = make_fake_fcntl()
+        with mock.patch.object(creality_cfs, "_HAS_POSIX_SERIAL", True), \
+             mock.patch.object(creality_cfs, "os", fake_os), \
+             mock.patch.object(creality_cfs, "termios", fake_t), \
+             mock.patch.object(creality_cfs, "fcntl", fake_f):
+            cfs._connect_serial()
+            result = cfs.get_box_state(0x01, timeout=0.05, retries=1)
+        assert result is None
 
     def test_get_version_sn_decodes_ascii(self):
         cfs = _bare_cfs()
@@ -877,10 +922,24 @@ class TestPublicApiThroughRealTransport:
         assert result is True
 
     def test_set_pre_loading_ack_returns_true(self):
+        # v1.4.0: signature is (addr, mask, phase) -- arm=0x00/disarm=0x01 (the old
+        # ENABLE pass-through was inverted vs the wire). ACK STATUS 0x00 -> True.
         cfs = _bare_cfs()
         frame = build_message(0x01, STATUS_ADDRESSING, CMD_SET_PRE_LOADING)
-        result = self._run(cfs, frame, lambda: cfs.set_pre_loading(0x01, 0x0F, 1))
+        result = self._run(
+            cfs, frame,
+            lambda: cfs.set_pre_loading(0x01, PRELOAD_MASK_ALL, PRELOAD_PHASE_ARM))
         assert result is True
+
+    def test_set_pre_loading_non_ack_returns_false(self):
+        # v1.4.0: the reply STATUS byte is now checked -- a 0x16 (busy NAK) reply means
+        # the controller did NOT finish and must yield False, not a blind True.
+        cfs = _bare_cfs()
+        frame = build_message(0x01, BOX_EVENT_BUSY, CMD_SET_PRE_LOADING)
+        result = self._run(
+            cfs, frame,
+            lambda: cfs.set_pre_loading(0x01, PRELOAD_MASK_ALL, PRELOAD_PHASE_ARM))
+        assert result is False
 
     def test_get_hardware_status_returns_flag_byte(self):
         cfs = _bare_cfs()
@@ -913,14 +972,32 @@ class TestPublicApiThroughRealTransport:
         result = self._run(cfs, frame, lambda: cfs.measuring_wheel(0x01))
         assert result == word
 
-    def test_retrude_buffer_node_single_channel_ack(self):
+    def test_measuring_wheel_mm_decodes_be_ieee754_float(self):
+        # v1.4.0: the 0x0E word decode is RESOLVED -- a big-endian IEEE-754 float
+        # (negative, magnitude grows as filament feeds). 0xc499c5bf == -1230.18.
+        import struct
         cfs = _bare_cfs()
-        # Buffer-node frames echo addr 0x81, status 0x00.
-        frame = build_message(ADDR_BUFFER_NODE, STATUS_ADDRESSING, CMD_RETRUDE_PROCESS)
+        frame = _good_frame(0x01, CMD_MEASURING_WHEEL, bytes.fromhex("c499c5bf"))
+        result = self._run(cfs, frame, lambda: cfs.measuring_wheel_mm(0x01))
+        assert result == pytest.approx(struct.unpack(">f", bytes.fromhex("c499c5bf"))[0])
+        assert result == pytest.approx(-1230.18, abs=0.01)
+
+    def test_retrude_start_finish_pair_acks_return_true(self):
+        # v1.4.0: retrude is the START [slot][0x00] / FINISH [slot][0x01] pair; the
+        # driving_write delivers one ACK frame per write, so both frames ACK -> True.
+        cfs = _bare_cfs()
+        frame = build_message(0x01, STATUS_ADDRESSING, CMD_RETRUDE_PROCESS)
         result = self._run(
-            cfs, frame, lambda: cfs.retrude_process(ADDR_BUFFER_NODE, slot=0x01)
+            cfs, frame, lambda: cfs.retrude_process(0x01, slot=SLOT_T0)
         )
         assert result is True
+
+    def test_retrude_buffer_node_raises_value_error(self):
+        # v1.4.0: the buffer-node (0x81) retrude form is wire-disproven (that 0x11
+        # traffic is FOC-servo frames, not CFS) and now raises before any bus traffic.
+        cfs = _bare_cfs()
+        with pytest.raises(ValueError, match="out of range"):
+            cfs.retrude_process(ADDR_BUFFER_NODE, slot=SLOT_T1)
 
     def test_send_command_raises_when_not_connected(self):
         cfs = _bare_cfs()

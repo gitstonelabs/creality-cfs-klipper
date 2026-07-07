@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 test_messages.py: Unit tests for build_message() and parse_message() in creality_cfs.py.
 

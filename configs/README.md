@@ -15,7 +15,7 @@ Minimum required configuration:
 serial_port: /dev/ttyS5
 ```
 
-All options with defaults:
+Core options for the normal single-CFS setup:
 
 ```ini
 [creality_cfs]
@@ -23,9 +23,18 @@ serial_port: /dev/ttyS5
 baud: 230400
 timeout: 0.1
 retry_count: 3
-box_count: 4
+box_count: 1                        # CONTROLLERS in the daisy chain, not slots;
+                                    # one CFS (four slots) = 1
 auto_init: True
+filament_sensor: filament_sensor    # toolhead switch that gates loads/unloads
+extrude_temp: 220                   # M109 melt guard before any filament move
 ```
+
+The optional cutter (`cut_switch_pin`, `pre_cut_pos_x/y`, `cut_pos_x`,
+`cut_pos_x_max`, `cut_velocity`), flush (`nozzle_volume`, `flush_multiplier`,
+`flush_cycle_cap`, `flush_default_len`, `flush_velocity`,
+`nozzle_clean_macro`), and load-tuning (`load_max_bursts`,
+`load_wall_budget`) options are documented inline in `printer.cfg.example`.
 
 ### `cfs_macros.cfg`
 
@@ -36,10 +45,12 @@ Optional Klipper macro file providing convenience G-code wrappers:
 | `CFS_INITIALIZE` | Run auto-addressing sequence with logging |
 | `CFS_CHECK_STATUS` | Query state of all CFS boxes |
 | `CFS_GET_VERSIONS` | Query firmware version from all boxes |
-| `CFS_PRINT_START` | Pre-print init: addressing + status check |
-| `CFS_PRINT_END` | Post-print cleanup (placeholder until 0x11 payload is known) |
-| `CFS_ENABLE_PRELOAD` | Enable pre-loading on all boxes, all slots |
-| `CFS_DISABLE_PRELOAD` | Disable pre-loading on all boxes, all slots |
+| `CFS_PRINT_START` | Pre-print init: status check + arm pre-loading (wire phase 0x00) |
+| `CFS_PRINT_END` | Post-print cleanup: unload the tracked active tool, disarm pre-loading |
+| `CFS_ENABLE_PRELOAD` | Arm pre-loading, all slots |
+| `CFS_DISABLE_PRELOAD` | Disarm pre-loading, all slots |
+| `_CFS_TOOL_CHANGE` | Shared tool-change sequence (optional cut, unload old, load new, optional flush) |
+| `T0` / `T1` / `T2` / `T3` | Select slot 0-3 on the controller at `BOX=1`. Tools are SLOTS on one controller (bitmask 0x01/0x02/0x04/0x08), not bus addresses; a daisy-chained second box would carry T4-T7 on `BOX=2` |
 
 To use the macros, add this line to `printer.cfg`:
 

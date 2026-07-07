@@ -1,16 +1,47 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 tests/test_stubs.py
 
-Tests for previously-stubbed commands that are now fully implemented
-in v1.1.0. These tests validate the real implementations rather than
-checking for NotImplementedError.
+Tests for the 0x10 EXTRUDE / 0x11 RETRUDE implementations.
+
+v1.4.0 REWRITE: these tests now validate the hardware-validated choreography model
+(the sensor-gated push loop and the START/FINISH unload pair) instead of the
+wire-disproven fixed ramp / position-settle / back-to-back-retrude behavior the
+pre-v1.4.0 suite locked in:
+  * the 0x05 push reply is a BE IEEE-754 wheel float (the old [state][uint16]
+    decode was a misparse),
+  * the 0x06/0x07 finalize only fires after the toolhead switch latches,
+  * the per-push wheel-advance watchdog breaks a self-limited arm early,
+  * the retrude START/FINISH frames both carry the slot bitmask and use the
+    hold-covering timeouts (start 22 s / finish 13 s),
+  * the buffer-node (0x81) retrude form is wire-disproven and now rejected.
 """
 
 import itertools
+import struct
 
 import pytest
-from unittest.mock import MagicMock, patch
-from src.creality_cfs import CrealityCFS, CMD_EXTRUDE_PROCESS, CMD_RETRUDE_PROCESS
+from unittest.mock import MagicMock
+from src.creality_cfs import (
+    CrealityCFS,
+    CMD_EXTRUDE_PROCESS,
+    CMD_RETRUDE_PROCESS,
+    ADDR_BUFFER_NODE,
+    SLOT_T0,
+    SLOT_T1,
+    EXTRUDE_SUB_INIT,
+    EXTRUDE_SUB_ENGAGE,
+    EXTRUDE_SUB_PUSH,
+    EXTRUDE_SUB_SETTLE,
+    EXTRUDE_SUB_FINALIZE,
+    EXTRUDE_FINALIZE_DATA,
+    LOAD_TOPUP_MAX_BURSTS,
+    LOAD_PUSH_STALL_LIMIT,
+    RETRUDE_PHASE_START,
+    RETRUDE_PHASE_FINISH,
+    RETRUDE_START_TIMEOUT_S,
+    RETRUDE_FINISH_TIMEOUT_S,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -20,10 +51,9 @@ from src.creality_cfs import CrealityCFS, CMD_EXTRUDE_PROCESS, CMD_RETRUDE_PROCE
 def _stub_reactor():
     """Return a reactor stub whose monotonic() advances 1s per call.
 
-    v1.3.0 (B1): extrude_process()'s STREAM-loop deadline was moved off time.time() onto
-    self.reactor.monotonic() (the reactor clock _send_command yields the greenlet against).
-    The bare instance built by make_cfs_with_mock_send therefore needs a reactor with a
-    monotonic() that advances so the loop terminates promptly without real sleeps.
+    The choreography wall budgets are measured on self.reactor.monotonic() (the
+    clock _send_command yields the greenlet against); a monotonic() that advances
+    makes the loops terminate promptly without real sleeps.
     """
     reactor = MagicMock()
     counter = itertools.count()
@@ -31,196 +61,230 @@ def _stub_reactor():
     return reactor
 
 
+def _wheel_frame(mm):
+    """A fake parsed 0x05 push reply carrying the BE float wheel word."""
+    return {"data": struct.pack(">f", mm), "status": 0x00}
+
+
 def make_cfs_with_mock_send(send_return=None):
-    """Create a CrealityCFS instance with _send_command mocked out."""
+    """Create a bare CrealityCFS instance with _send_command mocked out."""
     instance = object.__new__(CrealityCFS)
     instance._send_command = MagicMock(return_value=send_return)
     instance.is_connected = True
     instance.reactor = _stub_reactor()
+    # Choreography attributes normally set from config in __init__:
+    instance.load_wall_budget = 90.0
+    instance.load_max_bursts = LOAD_TOPUP_MAX_BURSTS
+    instance.filament_sensor_name = "filament_sensor"
+    # Bare printer with no optional objects (no toolhead filament switch).
+    printer = MagicMock()
+    printer.lookup_object.side_effect = lambda name, default=None: default
+    instance.printer = printer
     return instance
 
 
+def _sent_payloads(instance):
+    """Extract the data payloads of every _send_command call, in order."""
+    payloads = []
+    for call in instance._send_command.call_args_list:
+        data = call.kwargs.get("data")
+        if data is None and len(call.args) > 3:
+            data = call.args[3]
+        payloads.append(bytes(data) if data is not None else b"")
+    return payloads
+
+
 # ---------------------------------------------------------------------------
-# CMD_EXTRUDE_PROCESS (0x10): real implementation tests
+# CMD_EXTRUDE_PROCESS (0x10): sensor-gated load
 # ---------------------------------------------------------------------------
 
 class TestExtrudeProcess:
 
     def test_extrude_process_returns_dict(self):
-        """extrude_process() returns a dict with expected keys."""
-        # Mock: INIT returns ok, POLL returns ACK, STREAM returns no response
-        def side_effect(addr, status, cmd, data, **kwargs):
-            sub = data[1] if len(data) > 1 else 0
-            if sub == 0x00:  # INIT
-                return {"data": bytes([0x00])}
-            return None  # POLL and STREAM timeout
-
-        instance = make_cfs_with_mock_send()
-        instance._send_command.side_effect = side_effect
-
-        result = instance.extrude_process(0x01)
-
-        assert isinstance(result, dict)
-        assert "init_ok" in result
-        assert "final_pos" in result
-        assert "final_state" in result
-        assert "polls" in result
-
-    def test_extrude_process_init_ok_true_on_success(self):
-        """init_ok=True when INIT sub-command returns status 0x00."""
-        def side_effect(addr, status, cmd, data, **kwargs):
-            if data[1] == 0x00:
-                return {"data": bytes([0x00])}
-            return None
-
-        instance = make_cfs_with_mock_send()
-        instance._send_command.side_effect = side_effect
-
-        result = instance.extrude_process(0x01)
-        assert result["init_ok"] is True
-
-    def test_extrude_process_init_ok_false_on_no_response(self):
-        """init_ok=False when INIT sub-command returns no response."""
+        """extrude_process() returns a dict with the v1.4.0 keys."""
         instance = make_cfs_with_mock_send(send_return=None)
         result = instance.extrude_process(0x01)
-        assert result["init_ok"] is False
+        assert isinstance(result, dict)
+        assert "latched" in result
+        assert "cycles" in result
+        assert "have_sensor" in result
 
-    def test_extrude_process_polls_stream_and_reports_position(self):
-        """STREAM sub-command responses are decoded into final_pos."""
-        call_count = [0]
-
-        def side_effect(addr, status, cmd, data, **kwargs):
-            sub = data[1] if len(data) > 1 else 0
-            if sub == 0x00:  # INIT
-                return {"data": bytes([0x00])}
-            if sub == 0x04:  # POLL
-                return {"data": b""}
-            if sub == 0x05:  # STREAM
-                call_count[0] += 1
-                # pos = 40000 = 400.00mm, state = 0xC4 (SPEED)
-                return {"data": bytes([0xC4, 0x9C, 0x40])}
-            return None
-
-        instance = make_cfs_with_mock_send()
-        instance._send_command.side_effect = side_effect
-
-        result = instance.extrude_process(0x01)
-        assert result["final_pos"] == pytest.approx(400.00, abs=1.0)
-        assert result["final_state"] == 0xC4
-        assert result["polls"] > 0
+    def test_extrude_process_sensorless_runs_one_cycle(self):
+        """Without a toolhead filament switch the load runs exactly ONE ungated cycle
+        (it cannot know when filament arrives) and reports latched=False."""
+        instance = make_cfs_with_mock_send(send_return={"data": b"", "status": 0x00})
+        result = instance.extrude_process(0x01, slot=SLOT_T0)
+        assert result["have_sensor"] is False
+        assert result["cycles"] == 1
+        assert result["latched"] is False
 
     def test_extrude_process_invalid_addr_raises_value_error(self):
-        """Out-of-range address raises ValueError."""
         instance = make_cfs_with_mock_send()
         with pytest.raises(ValueError):
             instance.extrude_process(0x00)
         with pytest.raises(ValueError):
             instance.extrude_process(0x05)
 
-    def test_extrude_process_valid_addrs_accepted(self):
-        """Addresses 0x01-0x04 are accepted without ValueError."""
-        instance = make_cfs_with_mock_send(send_return=None)
-        for addr in [0x01, 0x02, 0x03, 0x04]:
-            # Should not raise: returns dict even with no serial response
-            result = instance.extrude_process(addr)
-            assert isinstance(result, dict)
+    def test_extrude_process_invalid_slot_raises_value_error(self):
+        instance = make_cfs_with_mock_send()
+        with pytest.raises(ValueError):
+            instance.extrude_process(0x01, slot=0x03)   # not a 1-hot bitmask
 
     def test_extrude_process_uses_correct_command_code(self):
-        """_send_command is called with CMD_EXTRUDE_PROCESS (0x10)."""
         instance = make_cfs_with_mock_send(send_return=None)
         instance.extrude_process(0x01)
-        calls = instance._send_command.call_args_list
-        cmd_codes = [c[0][2] for c in calls]  # positional arg index 2 = func
+        cmd_codes = [c[0][2] for c in instance._send_command.call_args_list]
         assert CMD_EXTRUDE_PROCESS in cmd_codes
 
-    def test_extrude_process_sends_init_subcommand(self):
-        """First call sends INIT sub-command 0x02/0x00."""
+    def test_extrude_cycle_starts_with_init_then_engage(self):
+        """The gated cycle opens with [slot] 00 00 (init/arm) then [slot] 04 00 (engage);
+        every stage frame carries THREE data bytes."""
         instance = make_cfs_with_mock_send(send_return=None)
-        instance.extrude_process(0x01)
-        first_call = instance._send_command.call_args_list[0]
-        data = first_call[1].get('data') if first_call[1] else first_call[0][3]
-        assert data[0] == 0x02
-        assert data[1] == 0x00
+        instance.extrude_process(0x01, slot=SLOT_T1)
+        payloads = _sent_payloads(instance)
+        assert payloads[0] == bytes([SLOT_T1, EXTRUDE_SUB_INIT, 0x00])
+        assert payloads[1] == bytes([SLOT_T1, EXTRUDE_SUB_ENGAGE, 0x00])
+
+    def test_extrude_no_finalize_without_switch(self):
+        """SETTLE (0x06) / FINALIZE (0x07 03) are GATED on the toolhead switch: with no
+        sensor they must never be issued (the wire-disproven fixed ramp always fired
+        them)."""
+        instance = make_cfs_with_mock_send(send_return={"data": b"", "status": 0x00})
+        instance.extrude_process(0x01, slot=SLOT_T0)
+        payloads = _sent_payloads(instance)
+        stage_bytes = [p[1] for p in payloads if len(p) >= 2]
+        assert EXTRUDE_SUB_SETTLE not in stage_bytes
+        assert EXTRUDE_SUB_FINALIZE not in stage_bytes
+
+    def test_gated_ramp_finalizes_after_switch_latches(self):
+        """extrude_load_ramp_gated(): once sensor_fn() latches True, the 0x05 push loop
+        exits and 0600 + 0703 are issued (the finalize carries data byte 0x03)."""
+        instance = make_cfs_with_mock_send(send_return={"data": b"", "status": 0x00})
+        sensor_reads = iter([False, False, True, True, True])
+        latched = instance.extrude_load_ramp_gated(
+            0x01, SLOT_T0,
+            sensor_fn=lambda: next(sensor_reads, True),
+            deadline_fn=lambda: 60.0)
+        assert latched is True
+        payloads = _sent_payloads(instance)
+        assert payloads[-2] == bytes([SLOT_T0, EXTRUDE_SUB_SETTLE, 0x00])
+        assert payloads[-1] == bytes([SLOT_T0, EXTRUDE_SUB_FINALIZE, EXTRUDE_FINALIZE_DATA])
+
+    def test_gated_ramp_push_watchdog_breaks_on_self_limit(self):
+        """The per-push wheel-advance watchdog: when consecutive pushes advance the
+        wheel by ~0 (the box's per-arm self-limit fast-acks), the cycle breaks after
+        LOAD_PUSH_STALL_LIMIT dead pushes instead of grinding max_pushes."""
+        instance = make_cfs_with_mock_send()
+        # Every push reply reports the SAME wheel value -> zero advance.
+        instance._send_command.return_value = _wheel_frame(-500.0)
+        latched = instance.extrude_load_ramp_gated(
+            0x01, SLOT_T0,
+            sensor_fn=lambda: False,
+            deadline_fn=lambda: 60.0,
+            max_pushes=10)
+        assert latched is False
+        payloads = _sent_payloads(instance)
+        pushes = [p for p in payloads if len(p) >= 2 and p[1] == EXTRUDE_SUB_PUSH]
+        # First push sets the baseline; each subsequent zero-advance push increments the
+        # stall counter, so the loop stops at 1 + LOAD_PUSH_STALL_LIMIT pushes.
+        assert len(pushes) == 1 + LOAD_PUSH_STALL_LIMIT
+
+    def test_gated_ramp_keeps_pushing_while_wheel_advances(self):
+        """Pushes whose wheel advance is real (>= LOAD_PUSH_MIN_ADVANCE) never trip the
+        watchdog: the loop runs to max_pushes when the sensor stays clear."""
+        instance = make_cfs_with_mock_send()
+        wheel = itertools.count(0)
+        instance._send_command.side_effect = (
+            lambda *a, **kw: _wheel_frame(-300.0 * next(wheel)))
+        latched = instance.extrude_load_ramp_gated(
+            0x01, SLOT_T0,
+            sensor_fn=lambda: False,
+            deadline_fn=lambda: 60.0,
+            max_pushes=4)
+        assert latched is False
+        payloads = _sent_payloads(instance)
+        pushes = [p for p in payloads if len(p) >= 2 and p[1] == EXTRUDE_SUB_PUSH]
+        assert len(pushes) == 4
+
+    def test_extrude_wheel_decodes_be_float(self):
+        """_extrude_wheel(): the 0x05 push reply payload is a 4-byte BE IEEE-754 float
+        (the pre-v1.4.0 [state][uint16] model was a misparse)."""
+        assert CrealityCFS._extrude_wheel(_wheel_frame(-1230.18)) == pytest.approx(
+            -1230.18, abs=0.01)
+
+    def test_extrude_wheel_none_for_short_ack(self):
+        """Bare stage ACKs (no 4-byte payload) decode to None, not a bogus value."""
+        assert CrealityCFS._extrude_wheel({"data": b"", "status": 0x00}) is None
+        assert CrealityCFS._extrude_wheel(None) is None
 
 
 # ---------------------------------------------------------------------------
-# CMD_RETRUDE_PROCESS (0x11): real implementation tests
+# CMD_RETRUDE_PROCESS (0x11): START/FINISH pair
 # ---------------------------------------------------------------------------
 
 class TestRetrudeProcess:
 
     def test_retrude_process_returns_bool(self):
-        """retrude_process() returns a bool."""
-        instance = make_cfs_with_mock_send(send_return={"data": b""})
+        instance = make_cfs_with_mock_send(send_return={"data": b"", "status": 0x00})
         result = instance.retrude_process(0x01)
         assert isinstance(result, bool)
 
     def test_retrude_process_returns_true_on_ack(self):
-        """Returns True when CFS acknowledges the retract command."""
-        instance = make_cfs_with_mock_send(send_return={"data": b""})
+        instance = make_cfs_with_mock_send(send_return={"data": b"", "status": 0x00})
         assert instance.retrude_process(0x01) is True
 
     def test_retrude_process_returns_false_on_no_response(self):
-        """Returns False when no response received."""
         instance = make_cfs_with_mock_send(send_return=None)
         assert instance.retrude_process(0x01) is False
 
     def test_retrude_process_invalid_addr_raises_value_error(self):
-        """Out-of-range address raises ValueError."""
         instance = make_cfs_with_mock_send()
         with pytest.raises(ValueError):
             instance.retrude_process(0x00)
         with pytest.raises(ValueError):
             instance.retrude_process(0x05)
 
-    def test_retrude_process_valid_addrs_accepted(self):
-        """Addresses 0x01-0x04 are accepted without ValueError."""
-        instance = make_cfs_with_mock_send(send_return=None)
-        for addr in [0x01, 0x02, 0x03, 0x04]:
-            result = instance.retrude_process(addr)
-            assert isinstance(result, bool)
+    def test_retrude_buffer_node_form_removed(self):
+        """v1.4.0: the 'buffer node 0x81 single-byte retrude' is wire-disproven (that
+        traffic is FOC-servo frames on the shared bus, not a CFS retrude) -- the addr
+        is now rejected instead of emitting a bogus frame."""
+        instance = make_cfs_with_mock_send()
+        with pytest.raises(ValueError):
+            instance.retrude_process(ADDR_BUFFER_NODE, slot=0x01)
 
     def test_retrude_process_uses_correct_command_code(self):
-        """_send_command is called with CMD_RETRUDE_PROCESS (0x11)."""
         instance = make_cfs_with_mock_send(send_return=None)
         instance.retrude_process(0x01)
         cmd_code = instance._send_command.call_args[0][2]
         assert cmd_code == CMD_RETRUDE_PROCESS
 
-    def test_retrude_process_sends_correct_payload_start_phase(self):
-        """First payload is [slot, phase] = [0x02, 0x00] (start), WIRE-CONFIRMED 2026-06-09.
-
-        v1.2.0 corrected the box-controller payload from the pre-v1.2.0 [sub, slot]=[0x02,0x01]
-        to [slot_bitmask, phase] with phase 0x00 (start) issued first. The default slot is
-        SLOT_T1 (0x02). The first _send_command therefore carries b'\\x02\\x00'.
-        """
+    def test_retrude_process_sends_start_with_slot_bitmask(self):
+        """The START frame is [slot][0x00] -- the slot bitmask rides in BOTH frames."""
         instance = make_cfs_with_mock_send(send_return=None)
-        instance.retrude_process(0x01)
-        # call_args is the LAST call; with send_return=None the start phase fails and aborts,
-        # so the only/last call is the start phase.
-        call = instance._send_command.call_args
-        data = call[1].get('data') if call[1] else call[0][3]
-        assert data == bytes([0x02, 0x00])
+        instance.retrude_process(0x01, slot=SLOT_T1)
+        payloads = _sent_payloads(instance)
+        assert payloads[0] == bytes([SLOT_T1, RETRUDE_PHASE_START])
 
-    def test_retrude_process_is_single_command_when_start_unacked(self):
-        """When the start phase is unacked, retrude aborts after one _send_command call.
-
-        v1.2.0: the box-controller form is a 2-phase sequence ([slot,0x00] then [slot,0x01]),
-        but the start phase is a prerequisite, so a missing start ACK aborts before the running
-        phase. With send_return=None that yields exactly one call.
-        """
+    def test_retrude_process_aborts_when_start_unacked(self):
+        """A silent START aborts before the FINISH frame (one call total)."""
         instance = make_cfs_with_mock_send(send_return=None)
         instance.retrude_process(0x01)
         assert instance._send_command.call_count == 1
 
     def test_retrude_process_sends_both_phases_when_acked(self):
-        """When both phases ACK, retrude issues start [0x02,0x00] then running [0x02,0x01].
+        """START [slot,00] then FINISH [slot,01] when both ACK."""
+        instance = make_cfs_with_mock_send(send_return={"data": b"", "status": 0x00})
+        instance.retrude_process(0x01, slot=SLOT_T1)
+        payloads = _sent_payloads(instance)
+        assert payloads == [bytes([SLOT_T1, RETRUDE_PHASE_START]),
+                            bytes([SLOT_T1, RETRUDE_PHASE_FINISH])]
 
-        Replaces the pre-v1.2.0 one-shot assumption with the wire-confirmed 2-phase sequence.
-        """
-        instance = make_cfs_with_mock_send(send_return={"data": b""})
-        instance.retrude_process(0x01)
-        payloads = []
-        for call in instance._send_command.call_args_list:
-            payloads.append(call[1].get('data') if call[1] else call[0][3])
-        assert payloads == [bytes([0x02, 0x00]), bytes([0x02, 0x01])]
+    def test_retrude_timeouts_cover_the_held_acks(self):
+        """The START frame gets the 22 s pull timeout and the FINISH frame the 13 s
+        hold timeout (the box HOLDS the finish ACK ~9.6 s on a real pull; the old
+        0.5 s timeout could never see it, so unloads could never confirm)."""
+        instance = make_cfs_with_mock_send(send_return={"data": b"", "status": 0x00})
+        instance.retrude_process(0x01, slot=SLOT_T0)
+        timeouts = [c.kwargs.get("timeout")
+                    for c in instance._send_command.call_args_list]
+        assert timeouts == [RETRUDE_START_TIMEOUT_S, RETRUDE_FINISH_TIMEOUT_S]

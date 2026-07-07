@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 test_commands.py: Tests for individual CFS command implementations in CrealityCFS.
 
@@ -16,9 +17,9 @@ Covered commands:
   0x0D CMD_SET_PRE_LOADING   configure pre-loading slot mask
   0x14 CMD_GET_VERSION_SN    query 22-byte ASCII version/SN
 
-Stubbed (NotImplementedError):
-  0x10 CMD_EXTRUDE_PROCESS
-  0x11 CMD_RETRUDE_PROCESS
+Covered elsewhere (tests/test_stubs.py):
+  0x10 CMD_EXTRUDE_PROCESS   sensor-gated load choreography (v1.4.0)
+  0x11 CMD_RETRUDE_PROCESS   START/FINISH unload pair (v1.4.0)
 
 All tests are independent: no shared mutable state between tests.
 """
@@ -47,6 +48,11 @@ from creality_cfs import (
     CMD_GET_BOX_STATE,
     CMD_SET_PRE_LOADING,
     CMD_GET_VERSION_SN,
+    BOX_STATE_LOADED_B3,
+    BOX_STATE_FEEDING_B3,
+    BOX_EVENT_IDLE,
+    PRELOAD_PHASE_DISARM,
+    PRELOAD_PHASE_SLOT_REARM,
     BROADCAST_ADDR_MB,
     BROADCAST_ADDR_ALL,
     ADDR_BOX_MIN,
@@ -363,27 +369,60 @@ class TestCmdGetBoxState:
         assert len(msg) == 6
 
     def test_cmd_get_box_state_parses_4_byte_response(self, cfs_controller):
-        """get_box_state() parses the 0x0A state word and returns state, raw, addr.
+        """get_box_state() decodes the 4-byte 0x0A word into the v1.4.0 keys.
 
         Captured response: b'\\xf7\\x01\\x07\\x00\\x0a\\x1c\\x14\\x00\\x00\\x48'
-        data = b'\\x1c\\x14\\x00\\x00'. Per the v1.2.0 wire-confirmed decode the word is
-        [class_byte=data[0]][state=data[1]], so class_byte=0x1C and state=0x14 (the lo byte).
-        The pre-v1.2.0 model read state from data[0] (0x1C); that was corrected from the wire.
+        data = b'\\x1c\\x14\\x00\\x00'.
+
+        v1.4.0: the [class_byte][state] decode of b0/b1 is WIRE-DISPROVEN -- b0/b1 are an
+        opaque drifting firmware base (exposed as fw_base, diagnostics only). The real load
+        flag is data[3]: 0x02 = loaded/print-locked, 0x00 = feed/change mode. The frame
+        STATUS byte is the async event channel (0x00 = idle).
         """
         resp = b'\xf7\x01\x07\x00\x0a\x1c\x14\x00\x00\x48'
         cfs_controller._serial.response_queue.append(resp[:3])
         cfs_controller._serial.response_queue.append(resp[3:])
 
         result = cfs_controller.get_box_state(0x01)
-        assert result["state"] == 0x14         # lo byte (data[1]) is the meaningful state
-        assert result["class_byte"] == 0x1C    # hi/class byte (data[0])
+        assert result["fw_base"] == 0x1C14     # opaque b0/b1 base, diagnostics only
+        assert result["substatus"] == 0x00
+        assert result["feeding"] is True       # data[3] == 0x00 = feed/change mode
+        assert result["loaded"] is False
+        assert result["event"] == BOX_EVENT_IDLE
         assert result["raw"] == b'\x1c\x14\x00\x00'
         assert result["addr"] == 0x01
 
-    def test_cmd_get_box_state_raises_on_no_response(self, cfs_controller):
-        """get_box_state() raises RuntimeError when no response received."""
-        with pytest.raises(RuntimeError, match="0x01"):
-            cfs_controller.get_box_state(0x01)
+    def test_cmd_get_box_state_loaded_flag_from_data3(self, cfs_controller):
+        """get_box_state() reads loaded/print-locked from data[3] == 0x02.
+
+        v1.4.0: loaded is keyed 1:1 to the SET_BOX_MODE print-mode latch (data[3]),
+        NOT to the old wire-disproven [hi][lo 0x20/0x1f] word.
+        """
+        resp = build_message(0x01, STATUS_ADDRESSING, CMD_GET_BOX_STATE,
+                             bytes([0x1C, 0x24, 0x00, BOX_STATE_LOADED_B3]))
+        cfs_controller._serial.response_queue.append(resp[:3])
+        cfs_controller._serial.response_queue.append(resp[3:])
+
+        result = cfs_controller.get_box_state(0x01)
+        assert result["loaded"] is True
+        assert result["feeding"] is False
+        assert BOX_STATE_LOADED_B3 == 0x02 and BOX_STATE_FEEDING_B3 == 0x00
+
+    def test_cmd_get_box_state_returns_none_on_no_response(self, cfs_controller):
+        """get_box_state() returns None when no response received.
+
+        v1.4.0: silent-CFS tolerant -- no longer raises RuntimeError, so a missing box
+        can never abort a caller mid-choreography.
+        """
+        assert cfs_controller.get_box_state(0x01) is None
+
+    def test_cmd_get_box_state_returns_none_on_short_payload(self, cfs_controller):
+        """get_box_state() returns None for a <4-byte data payload (v1.4.0)."""
+        resp = build_message(0x01, STATUS_ADDRESSING, CMD_GET_BOX_STATE, b'\x1c\x24')
+        cfs_controller._serial.response_queue.append(resp[:3])
+        cfs_controller._serial.response_queue.append(resp[3:])
+
+        assert cfs_controller.get_box_state(0x01) is None
 
     @pytest.mark.parametrize("addr", [1, 2, 3, 4])
     def test_cmd_get_box_state_message_addr_byte(self, addr):
@@ -400,41 +439,81 @@ class TestCmdSetPreLoading:
     """Tests for CMD_SET_PRE_LOADING (0x0D)."""
 
     def test_cmd_set_pre_loading_message_matches_capture(self):
-        """SET_PRE_LOADING slave 1 mask=0x0F enable=0x01 matches captured frame."""
-        msg = build_message(0x01, STATUS_OPERATIONAL, CMD_SET_PRE_LOADING, b'\x0f\x01')
-        assert msg == b'\xf7\x01\x05\xff\x0d\x0f\x01\x69'
+        """SET_PRE_LOADING slave 1 mask=0x0F phase=0x01 matches captured frame.
 
-    def test_cmd_set_pre_loading_returns_true_on_response(self, cfs_controller):
-        """set_pre_loading() returns True when response received.
+        v1.4.0: payload byte order is [mask][phase]; phase 0x01 is the wire DISARM
+        (the old ENABLE=1 -> 0x01 mapping was inverted vs the wire).
+        """
+        msg = build_message(0x01, STATUS_OPERATIONAL, CMD_SET_PRE_LOADING,
+                            bytes([0x0F, PRELOAD_PHASE_DISARM]))
+        assert msg == b'\xf7\x01\x05\xff\x0d\x0f\x01\x69'
+        assert msg[5] == 0x0F                    # data[0] = slot mask
+        assert msg[6] == PRELOAD_PHASE_DISARM    # data[1] = phase
+
+    def test_cmd_set_pre_loading_returns_true_on_ack(self, cfs_controller):
+        """set_pre_loading() returns True on a STATUS-0x00 ACK reply.
 
         Captured ACK: b'\\xf7\\x01\\x03\\x00\\x0d\\x9e'
+        v1.4.0: the reply STATUS byte is now checked -- True ONLY on 0x00.
         """
         ack = b'\xf7\x01\x03\x00\x0d\x9e'
         cfs_controller._serial.response_queue.append(ack[:3])
         cfs_controller._serial.response_queue.append(ack[3:])
 
-        result = cfs_controller.set_pre_loading(0x01, 0x0F, 0x01)
+        result = cfs_controller.set_pre_loading(0x01, 0x0F, PRELOAD_PHASE_DISARM)
         assert result is True
+
+    def test_cmd_set_pre_loading_returns_false_on_nak_status(self, cfs_controller):
+        """set_pre_loading() returns False on a non-0x00 reply STATUS (0x16 NAK).
+
+        v1.4.0: a 0x16 STATUS means the controller did not finish the pre-load;
+        the pre-v1.4.0 code treated any reply as success.
+        """
+        nak = build_message(0x01, 0x16, CMD_SET_PRE_LOADING)
+        cfs_controller._serial.response_queue.append(nak[:3])
+        cfs_controller._serial.response_queue.append(nak[3:])
+
+        result = cfs_controller.set_pre_loading(0x01, 0x0F, PRELOAD_PHASE_DISARM)
+        assert result is False
 
     def test_cmd_set_pre_loading_returns_false_on_no_response(self, cfs_controller):
         """set_pre_loading() returns False when no response received."""
-        result = cfs_controller.set_pre_loading(0x01, 0x0F, 0x01)
+        result = cfs_controller.set_pre_loading(0x01, 0x0F, PRELOAD_PHASE_DISARM)
         assert result is False
 
     def test_cmd_set_pre_loading_invalid_addr_raises(self, cfs_controller):
         """set_pre_loading() raises ValueError for addr=0 (below minimum)."""
         with pytest.raises(ValueError):
-            cfs_controller.set_pre_loading(0x00, 0x0F, 0x01)
+            cfs_controller.set_pre_loading(0x00, 0x0F, PRELOAD_PHASE_DISARM)
 
     def test_cmd_set_pre_loading_invalid_addr_above_max_raises(self, cfs_controller):
         """set_pre_loading() raises ValueError for addr=5 (above maximum)."""
         with pytest.raises(ValueError):
-            cfs_controller.set_pre_loading(0x05, 0x0F, 0x01)
+            cfs_controller.set_pre_loading(0x05, 0x0F, PRELOAD_PHASE_DISARM)
 
-    def test_cmd_set_pre_loading_invalid_enable_value_raises(self, cfs_controller):
-        """set_pre_loading() raises ValueError for enable=2 (not 0 or 1)."""
-        with pytest.raises(ValueError, match="enable"):
-            cfs_controller.set_pre_loading(0x01, 0x0F, 0x02)
+    def test_cmd_set_pre_loading_phase_slot_rearm_is_valid(self, cfs_controller):
+        """set_pre_loading() accepts phase=0x02 (per-slot re-arm).
+
+        v1.4.0: phase 0x02 is a REAL wire phase (blocks ~38 s on hardware); the old
+        'enable must be 0 or 1' ValueError encoded the wire-disproven enable model.
+        """
+        ack = build_message(0x01, STATUS_ADDRESSING, CMD_SET_PRE_LOADING)
+        cfs_controller._serial.response_queue.append(ack[:3])
+        cfs_controller._serial.response_queue.append(ack[3:])
+
+        result = cfs_controller.set_pre_loading(0x01, 0x01, PRELOAD_PHASE_SLOT_REARM)
+        assert result is True
+
+    def test_cmd_set_pre_loading_invalid_phase_raises(self, cfs_controller):
+        """set_pre_loading() raises ValueError for phase > 0xFF (v1.4.0: out-of-byte-range,
+        replacing the wire-disproven 'enable not 0/1' check)."""
+        with pytest.raises(ValueError, match="phase"):
+            cfs_controller.set_pre_loading(0x01, 0x0F, 0x100)
+
+    def test_cmd_set_pre_loading_invalid_mask_raises(self, cfs_controller):
+        """set_pre_loading() raises ValueError for mask > 0xFF (out-of-byte-range)."""
+        with pytest.raises(ValueError, match="mask"):
+            cfs_controller.set_pre_loading(0x01, 0x100, PRELOAD_PHASE_DISARM)
 
     @pytest.mark.parametrize("slot_mask", [0x00, 0x0F, 0xFF])
     def test_cmd_set_pre_loading_slot_mask_boundary_values(self, slot_mask):

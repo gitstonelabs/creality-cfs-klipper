@@ -1,12 +1,13 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 test_gcode_handlers.py: Tests for Klipper G-code command handlers in CrealityCFS.
 
 Tests cover:
   - cmd_CFS_INIT: not connected error, success path, exception path
-  - cmd_CFS_STATUS: not connected, single box, all boxes, unmapped box, exception
+  - cmd_CFS_STATUS: not connected, single box, all boxes, unmapped box, silent box
   - cmd_CFS_VERSION: not connected, single box, all boxes, unmapped box, exception
   - cmd_CFS_SET_MODE: not connected, success, failure, exception
-  - cmd_CFS_SET_PRELOAD: not connected, success, failure, exception
+  - cmd_CFS_SET_PRELOAD: not connected, arm/disarm inversion fix, PHASE form, NAK, exception
   - cmd_CFS_ADDR_TABLE: all online states and modes printed
   - _connect_serial / _disconnect_serial lifecycle
   - _handle_ready / _handle_shutdown lifecycle handlers
@@ -31,6 +32,11 @@ from creality_cfs import (
     STATUS_OPERATIONAL,
     CMD_GET_BOX_STATE,
     CMD_GET_VERSION_SN,
+    BOX_EVENT_IDLE,
+    PRELOAD_PHASE_ARM,
+    PRELOAD_PHASE_DISARM,
+    PRELOAD_PHASE_SLOT_REARM,
+    PRELOAD_BLOCKING_TIMEOUT_S,
 )
 
 from tests.conftest import _make_fake_config
@@ -81,11 +87,35 @@ def _make_gcmd(box=None, mode=None, param=None, mask=None, enable=None):
         "PARAM": param if param is not None else 0x01,
         "MASK": mask,
         "ENABLE": enable,
+        # v1.4.0: cmd_CFS_SET_PRELOAD reads PHASE= before ENABLE=; unset must be None
+        # so the handler falls through to the ENABLE arm/disarm mapping.
+        "PHASE": None,
     }.get(key, default)
 
     # error() should return an Exception that callers raise
     gcmd.error.side_effect = lambda msg: Exception(msg)
     return gcmd
+
+
+def _box_state(addr, d3=0x02, event=BOX_EVENT_IDLE):
+    """Build a v1.4.0-shape get_box_state() success dict.
+
+    v1.4.0: the old {state, state_str, class_byte} decode is wire-disproven; b0/b1 are
+    an opaque firmware base and data[3] is the real load flag (0x02 loaded, 0x00 feeding).
+    """
+    raw = bytes([0x1C, 0x24, 0x00, d3])
+    return {
+        "fw_base": 0x1C24,
+        "substatus": 0x00,
+        "loaded": d3 == 0x02,
+        "feeding": d3 == 0x00,
+        "event": event,
+        "insert_event": False,
+        "event_phase": None,
+        "busy": False,
+        "addr": addr,
+        "raw": raw,
+    }
 
 
 # ===========================================================================
@@ -271,11 +301,15 @@ class TestCmdCFSStatus:
         assert "not assigned" in gcmd.respond_info.call_args[0][0]
 
     def test_cmd_cfs_status_single_box_queries_only_that_box(self, cfs_controller):
-        """CFS_STATUS BOX=2 only calls get_box_state(2), not other boxes."""
+        """CFS_STATUS BOX=2 only calls get_box_state(2) and reports LOADED from data[3].
+
+        v1.4.0: the state dict is {loaded, feeding, event, raw, ...}; the response text
+        names the d3-derived state (LOADED/FEEDING), not the disproven 'state=0x..'.
+        """
         # Mark box 2 as mapped
         cfs_controller._box_table[1].mapped = True
         cfs_controller.get_box_state = mock.MagicMock(
-            return_value={"state": 0x1C, "raw": b'\x1c\x14\x00\x00', "addr": 2}
+            return_value=_box_state(addr=2, d3=0x02)
         )
 
         gcmd = mock.MagicMock()
@@ -287,14 +321,20 @@ class TestCmdCFSStatus:
         cfs_controller.cmd_CFS_STATUS(gcmd)
 
         cfs_controller.get_box_state.assert_called_once_with(2)
+        text = gcmd.respond_info.call_args[0][0]
+        assert "LOADED" in text
+        assert "1c240002" in text  # raw hex echoed for diagnostics
 
     def test_cmd_cfs_status_all_boxes_queried_when_no_box_param(self, cfs_controller):
-        """CFS_STATUS without BOX param queries all mapped boxes."""
+        """CFS_STATUS without BOX param queries all mapped boxes and names FEEDING.
+
+        v1.4.0: d3==0x00 is the feed/change-mode flag; the report must say FEEDING.
+        """
         # Mark all 4 boxes as mapped
         for entry in cfs_controller._box_table:
             entry.mapped = True
         cfs_controller.get_box_state = mock.MagicMock(
-            return_value={"state": 0x1C, "raw": b'\x1c\x14\x00\x00', "addr": 1}
+            return_value=_box_state(addr=1, d3=0x00)
         )
 
         gcmd = mock.MagicMock()
@@ -306,13 +346,19 @@ class TestCmdCFSStatus:
         cfs_controller.cmd_CFS_STATUS(gcmd)
 
         assert cfs_controller.get_box_state.call_count == 4
+        text = gcmd.respond_info.call_args[0][0]
+        assert "FEEDING" in text
 
-    def test_cmd_cfs_status_handles_get_box_state_exception_gracefully(self, cfs_controller):
-        """CFS_STATUS includes 'ERROR' in output when get_box_state raises."""
+    def test_cmd_cfs_status_silent_box_reports_no_response(self, cfs_controller):
+        """CFS_STATUS reports 'NO RESPONSE' for a mapped box that stays silent.
+
+        v1.4.0: get_box_state no longer raises RuntimeError on timeout -- it returns
+        None (silent-CFS tolerant). Was test_cmd_cfs_status_handles_get_box_state_
+        exception_gracefully; the graceful-report intent survives, the mechanism moved
+        from exception-catching to the None return.
+        """
         cfs_controller._box_table[0].mapped = True
-        cfs_controller.get_box_state = mock.MagicMock(
-            side_effect=RuntimeError("timeout")
-        )
+        cfs_controller.get_box_state = mock.MagicMock(return_value=None)
 
         gcmd = mock.MagicMock()
         gcmd.error.side_effect = lambda msg: Exception(msg)
@@ -323,7 +369,7 @@ class TestCmdCFSStatus:
         cfs_controller.cmd_CFS_STATUS(gcmd)
 
         text = gcmd.respond_info.call_args[0][0]
-        assert "ERROR" in text
+        assert "NO RESPONSE" in text
 
 
 # ===========================================================================
@@ -451,8 +497,13 @@ class TestCmdCFSSetPreload:
         with pytest.raises(Exception, match="not connected"):
             cfs_controller.cmd_CFS_SET_PRELOAD(gcmd)
 
-    def test_cmd_cfs_set_preload_success_enable_responds(self, cfs_controller):
-        """CFS_SET_PRELOAD responds with 'enabled' text on success with enable=1."""
+    def test_cmd_cfs_set_preload_enable_sends_arm_phase(self, cfs_controller):
+        """CFS_SET_PRELOAD ENABLE=1 sends wire phase 0x00 (ARM) and responds 'armed'.
+
+        v1.4.0 INVERSION FIX: the pre-v1.4.0 handler passed ENABLE straight through as
+        the phase byte, so ENABLE=1 emitted [mask][0x01] -- the wire DISARM. ENABLE=1
+        must map to PRELOAD_PHASE_ARM (0x00). Was ..._success_enable_responds.
+        """
         cfs_controller.set_pre_loading = mock.MagicMock(return_value=True)
 
         gcmd = mock.MagicMock()
@@ -463,11 +514,18 @@ class TestCmdCFSSetPreload:
 
         cfs_controller.cmd_CFS_SET_PRELOAD(gcmd)
 
+        cfs_controller.set_pre_loading.assert_called_once_with(
+            1, 15, PRELOAD_PHASE_ARM, timeout=None, retries=1)
         text = gcmd.respond_info.call_args[0][0]
-        assert "enabled" in text
+        assert "armed" in text
+        assert "disarmed" not in text
 
-    def test_cmd_cfs_set_preload_success_disable_responds(self, cfs_controller):
-        """CFS_SET_PRELOAD responds with 'disabled' text when enable=0."""
+    def test_cmd_cfs_set_preload_disable_sends_disarm_phase(self, cfs_controller):
+        """CFS_SET_PRELOAD ENABLE=0 sends wire phase 0x01 (DISARM) and responds 'disarmed'.
+
+        v1.4.0: the other half of the inversion fix (ENABLE=0 used to emit phase 0x00,
+        the wire ARM). Was ..._success_disable_responds.
+        """
         cfs_controller.set_pre_loading = mock.MagicMock(return_value=True)
 
         gcmd = mock.MagicMock()
@@ -478,11 +536,39 @@ class TestCmdCFSSetPreload:
 
         cfs_controller.cmd_CFS_SET_PRELOAD(gcmd)
 
+        cfs_controller.set_pre_loading.assert_called_once_with(
+            1, 1, PRELOAD_PHASE_DISARM, timeout=None, retries=1)
         text = gcmd.respond_info.call_args[0][0]
-        assert "disabled" in text
+        assert "disarmed" in text
 
-    def test_cmd_cfs_set_preload_no_ack_still_responds(self, cfs_controller):
-        """CFS_SET_PRELOAD responds even when set_pre_loading returns False."""
+    def test_cmd_cfs_set_preload_phase_rearm_uses_blocking_timeout(self, cfs_controller):
+        """CFS_SET_PRELOAD PHASE=2 (per-slot re-arm) is sent with the 90 s blocking timeout.
+
+        v1.4.0: the advanced PHASE= form bypasses ENABLE; the slot re-arm blocks ~38 s
+        on the wire, so the handler must hand set_pre_loading the long timeout (hanging
+        up early NAK-wedges the box).
+        """
+        cfs_controller.set_pre_loading = mock.MagicMock(return_value=True)
+
+        gcmd = mock.MagicMock()
+        gcmd.error.side_effect = lambda msg: Exception(msg)
+        gcmd.get_int.side_effect = lambda key, default=None, **kw: {
+            "BOX": 1, "MASK": 2, "PHASE": 2
+        }.get(key, default)
+
+        cfs_controller.cmd_CFS_SET_PRELOAD(gcmd)
+
+        cfs_controller.set_pre_loading.assert_called_once_with(
+            1, 2, PRELOAD_PHASE_SLOT_REARM, timeout=PRELOAD_BLOCKING_TIMEOUT_S, retries=1)
+        text = gcmd.respond_info.call_args[0][0]
+        assert "re-arm" in text
+
+    def test_cmd_cfs_set_preload_no_ack_reports_not_acked(self, cfs_controller):
+        """CFS_SET_PRELOAD reports 'NOT ACKed' (no raise) when set_pre_loading is False.
+
+        v1.4.0: set_pre_loading now checks the reply STATUS byte; a NAK/silence returns
+        False and the handler must surface it in the response text.
+        """
         cfs_controller.set_pre_loading = mock.MagicMock(return_value=False)
 
         gcmd = mock.MagicMock()
@@ -492,7 +578,9 @@ class TestCmdCFSSetPreload:
         }.get(key, default)
 
         cfs_controller.cmd_CFS_SET_PRELOAD(gcmd)
+
         gcmd.respond_info.assert_called_once()
+        assert "NOT ACKed" in gcmd.respond_info.call_args[0][0]
 
     def test_cmd_cfs_set_preload_exception_raises_gcmd_error(self, cfs_controller):
         """CFS_SET_PRELOAD raises via gcmd.error() when set_pre_loading throws."""

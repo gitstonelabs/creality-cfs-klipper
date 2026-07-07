@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 test_crc.py: Unit tests for the CRC-8/SMBUS algorithm in creality_cfs.py.
 

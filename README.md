@@ -4,7 +4,7 @@
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue)
 ![Python](https://img.shields.io/badge/python-3.7%2B-blue)
 ![Klipper](https://img.shields.io/badge/klipper-0.11.0%2B-green)
-![Hardware Validated](https://img.shields.io/badge/hardware-validated-brightgreen)
+![Protocol](https://img.shields.io/badge/protocol-hardware--validated-brightgreen)
 
 Open-source Klipper integration for the Creality Filament System (CFS) multi-material unit.
 Run your CFS on any Klipper printer. No Creality hardware or firmware required.
@@ -15,17 +15,20 @@ Maintained by [@gitstonelabs](https://github.com/gitstonelabs)
 
 ## Status
 
-> **v1.1.1 Beta**
+> **v1.4.0 Beta**
 >
-> - ✅ Protocol fully reverse-engineered from live RS485 traffic captures
-> - ✅ All core commands implemented and validated on physical Creality Hi hardware
-> - ✅ Filament change commands (0x10/0x11) captured and implemented
+> - ✅ Protocol fully reverse-engineered from live RS485 traffic captures (CRC-verified frames)
+> - ✅ Transport, CRC, and auto-addressing capture-validated on this module
+> - ✅ Full choreography layer ported in v1.4.0: sensor-gated load (0x10), START/FINISH unload (0x11), mechanical cut with 0x05 post-check, hotend flush loop, wire-correct preload semantics, temperature guards, connect timing
+> - ✅ T0/T1/T2/T3 tool-change macros (slot-bitmask topology on one controller)
+> - ✅ Non-blocking reactor serial transport, no pyserial dependency, never blocks the Klipper reactor
 > - ✅ USB-RS485 dongle operation confirmed (CH341, works on any Linux host)
-> - ✅ CFS communicates on mainline Klipper over USB-RS485 adapter
-> - 🔵 Tool change macros (T0/T1/T2/T3) in progress
+> - 🔵 Choreography validation on hardware from THIS module in progress
 > - 🔵 Third-party hardware validation (non-Creality mainboard) in progress
 
-**Beta → v1.0:** When tool change macros are complete and validated on non-Creality hardware.
+**Validation honesty:** the transport, CRC, and addressing layers are capture-validated on this module. The choreography (load/unload/cut/flush sequencing, timings, and reply decodes) was hardware-validated on the reference implementation, same wire protocol, on a Creality Hi with a CFS v1 box. This module's port of that choreography is wire-faithful but has not yet been exercised on hardware from this module itself.
+
+**Beta exit:** the v1.4.0 choreography exercised end-to-end from this module on hardware, plus validation on a non-Creality mainboard.
 
 ---
 
@@ -51,8 +54,8 @@ Klipper extra module. With this module you can:
 | Hardware | Status |
 |----------|--------|
 | Creality Hi (F018) | ✅ Validated (primary reference hardware) |
-| K1 / K1C | ✅ Protocol confirmed identical |
-| K2 Plus / K2 Max | ✅ Protocol confirmed identical |
+| K1 / K1C | ⚠️ Untested. The K1-family firmware is a CAN build that remaps function codes (0x02/0x05/0x08/0x0C); do not assume the RS485 map applies |
+| K2 Plus / K2 Max | ⚠️ Untested (same CAN remap caveat as K1) |
 | Any printer + USB-RS485 adapter | ✅ Confirmed working (CH341 dongle) |
 | BTT Octopus + Jetson Orin Nano | 🔵 In progress |
 
@@ -79,7 +82,9 @@ wget https://raw.githubusercontent.com/gitstonelabs/creality-cfs-klipper/main/sr
 [creality_cfs]
 serial_port: /dev/ttyUSB0   # USB-RS485 adapter (use by-id path if available)
 baud: 230400
-box_count: 1                # number of CFS boxes in your daisy-chain (1-4)
+box_count: 1                # number of CFS CONTROLLERS in the daisy-chain (1-4), not slots
+filament_sensor: filament_sensor   # toolhead filament switch; gates loads and unloads
+extrude_temp: 220           # melt temp; every filament move blocks on M109 to this first
 ```
 
 For the Creality Hi mainboard RS485 port:
@@ -89,6 +94,10 @@ serial_port: /dev/ttyS5
 baud: 230400
 box_count: 1
 ```
+
+The cutter (`cut_switch_pin`, cut geometry) and flush tuning (`nozzle_volume`,
+`flush_cycle_cap`, `nozzle_clean_macro`, ...) options are documented in
+[configs/printer.cfg.example](configs/printer.cfg.example).
 
 ### 3. Wire the USB-RS485 adapter
 
@@ -137,24 +146,34 @@ CFS_VERSION BOX=1
 
 | Command | Description |
 |---------|-------------|
-| `CFS_INIT` | Run auto-addressing sequence; discovers and assigns addresses to all CFS boxes |
-| `CFS_STATUS [BOX=N]` | Query box operating state (IDLE / BUSY / ACTIVE) |
-| `CFS_VERSION [BOX=N]` | Query firmware version/serial number string |
+| `CFS_INIT` | Run the auto-addressing sequence; discovers and assigns addresses to all CFS controllers |
+| `CFS_STATUS [BOX=N]` | Query box state via 0x0A (LOADED / FEEDING flag plus the async event channel) |
+| `CFS_VERSION [BOX=N]` | Query firmware version/serial number string (0x14) |
 | `CFS_FW_VERSION BOX=N` | Query 0xF0 firmware version string (e.g. `cfs0_050_G32`) |
-| `CFS_SET_MODE BOX=N MODE=N` | Set box mode (0=standby, 1=load) |
-| `CFS_SET_PRELOAD BOX=N MASK=N ENABLE=N` | Configure slot pre-loading |
-| `CFS_EXTRUDE BOX=N` | Run extrude sequence; feeds filament to toolhead, reports position |
-| `CFS_RETRUDE BOX=N` | Retract filament back into CFS box |
-| `CFS_ADDR_TABLE` | Print address assignment table |
+| `CFS_SET_MODE BOX=N [TOOL=0-3] [MODE=N PARAM=N]` | Box-mode frames: per-slot print mode via TOOL, or the raw enter form via MODE/PARAM |
+| `CFS_SET_PRELOAD BOX=N MASK=N ENABLE=0\|1` | Arm (ENABLE=1, wire phase 0x00) or disarm pre-loading; advanced `PHASE=0-2` form for the blocking per-slot re-arm |
+| `CFS_EXTRUDE TOOL=0-3 [BOX=N] [TEMP=C]` | Full sensor-gated load: M109 melt guard, feeder engage, 0x10 push loop gated on the toolhead filament switch |
+| `CFS_RETRUDE TOOL=0-3 [BOX=N] [TEMP=C]` | Full unload: 0x11 START/FINISH pair with one interleaved toolhead pull, complete when the switch clears |
+| `CFS_CUT [BOX=N] [TEMP=C]` | Mechanical cut ram (requires `cut_switch_pin` and the cut geometry); 0x05 post-check |
+| `CFS_FLUSH [BOX=N] [LEN=\|VOLUME=] [VELOCITY=] [TEMP=]` | Hotend purge loop: per-cycle cap, measuring-wheel clog watchdog, optional wipe macro, final retract |
+| `CFS_ADDR_TABLE` | Print the address assignment table |
+| `T0` / `T1` / `T2` / `T3` | Tool-change macros (cfs_macros.cfg): optional cut, unload the old slot, load the new one, optional flush |
+
+**Topology:** one CFS is ONE controller on the RS485 bus (normally address 0x01, `BOX=1`)
+with four slots selected by a data-byte bitmask (`TOOL=0..3` maps to 0x01/0x02/0x04/0x08).
+`BOX=` exists for multi-box daisy-chains (a second 4-slot unit at address 2); it is a
+separate axis from tool slots. Tools are slots, not bus addresses.
 
 ---
 
 ## Protocol Summary
 
 - **Interface:** RS485 half-duplex, 230400 baud, 8N1
-- **Frame:** `[0xF7][ADDR][LEN][STATUS][CMD][DATA...][CRC8]`
+- **Frame:** `[0xF7][ADDR][LEN][STATUS][FUNC][DATA...][CRC8]`, LEN = len(DATA) + 3 (counts STATUS, FUNC, DATA, CRC)
 - **CRC:** CRC-8/SMBUS, poly=0x07, init=0x00, scope=`msg[2:-1]`
-- **Addressing:** Dynamic assignment, 0x01-0x04 for boxes
+- **STATUS byte:** 0xFF for host operational commands, 0x00 for addressing and box replies; in replies it doubles as the async event channel (0x30 insert push, 0x16 busy/active-cal)
+- **Addressing:** dynamic assignment, 0x01-0x04 for controllers; tools/slots are the data-byte bitmask on one controller, not addresses
+- **Measuring wheel:** 0x0E and the 0x10 push replies carry a 4-byte big-endian IEEE-754 float (negative, magnitude grows as filament feeds)
 - **Connector:** 6-pin (see hardware.md for full pinout)
 
 All commands confirmed from live RS485 traffic captures. See [docs/protocol.md](docs/protocol.md) for full details.
@@ -168,6 +187,7 @@ This protocol was reverse-engineered through:
 1. **Source analysis:** `auto_addr_wrapper.py` from `CrealityOfficial/Hi_Klipper` (GPL-3.0)
 2. **Binary analysis:** `strings` extraction from `box_wrapper.cpython-39.so` and `serial_485_wrapper.cpython-39.so`
 3. **Live RS485 capture:** USB-RS485 sniffer on Creality Hi during T0→T1→T2→T3 tool changes
+4. **Reference implementation:** an open clean-room `box.py` stack deployed and exercised on a real Creality Hi + CFS v1 (load, unload, flush, and cut-read verified on the wire); the v1.4.0 choreography is ported from it
 
 Raw capture files are in [`captures/`](captures/) for independent verification.
 
@@ -183,22 +203,26 @@ escalation is a formal complaint with the
 
 ## Roadmap
 
-### ✅ v1.1.1 Beta (current)
-- Stock box_wrapper.so cross-reference: 7 commands confirmed identical, 10 inventoried as TODO pending a capture
-- Documented the steer/camera (addr 0x41) and external_material/RFID (addr 0x11) CFS modules
+### ✅ v1.4.0 Beta (current)
+- Choreography layer ported from the hardware-validated reference implementation: sensor-gated load, START/FINISH unload with the toolhead-switch completion gate, mechanical cut ram, hotend flush loop with clog watchdog, wire-correct preload semantics (arm = phase 0x00), connect timing (~9.5 s box wake)
+- 0x10 push-reply decode corrected: a 4-byte big-endian IEEE-754 measuring-wheel float (the old motor-state + uint16 position model was a misparse)
+- 0x0E measuring-wheel decode resolved (same BE float, negative, magnitude-monotonic)
+- T0/T1/T2/T3 macros fixed to the slot-bitmask topology: tools are slots on one controller, not bus addresses
+- Mainline temperature guards: blocking M109 plus a 170 C floor before any feed toward the hotend (box-motor feeds bypass Klipper's cold-extrude protection entirely)
 
-### ✅ v1.1.0 Beta
-- All protocol commands confirmed from live hardware capture
-- CMD_EXTRUDE_PROCESS (0x10) and CMD_RETRUDE_PROCESS (0x11) implemented
-- CMD_GET_BOX_STATE (0x08) corrected (was wrong function code 0x0A)
-- STATUS=0xFF for operational commands confirmed from capture
-- USB-RS485 operation confirmed on mainline Klipper
-- Buffer switch confirmed as direct GPIO, not RS485
+### ✅ v1.3.0
+- Non-blocking reactor serial transport; no pyserial dependency, never blocks the Klipper reactor greenlet
+- Optional kernel RS485 RTS direction control (`rts_on_send`)
 
-### 🔵 v1.2.0 Tool Change Macros
-- T0/T1/T2/T3 macro set replacing box_wrapper.so functionality
-- Full automated multi-material tool change on mainline Klipper
-- Validated on BTT Octopus + Jetson Orin Nano
+### ✅ v1.2.x
+- Wire-evidenced corrections from CRC-verified Hi captures: GET_BOX_STATE is 0x0A (0x08 is GET_HARDWARE_STATUS, the toolhead filament-sensor read), slot bitmask replaces the hardcoded T1 slot, CUT_STATE (0x05), CTRL_CONNECTION_MOTOR_ACTION (0x0F), MEASURING_WHEEL (0x0E) added
+
+### ✅ v1.1.x
+- 0x10/0x11 first implemented from live capture; USB-RS485 on mainline Klipper confirmed; buffer switch confirmed as direct GPIO, not RS485
+
+### 🔵 Next: hardware validation of the v1.4.0 port
+- Exercise the full load/unload/cut/flush choreography on hardware from THIS module (it is currently a wire-faithful port of the reference implementation's hardware-validated behavior)
+- Validate on BTT Octopus + Jetson Orin Nano (non-Creality mainboard)
 
 ### 🟢 v2.0.0 Production Release
 - Validated on multiple third-party hardware combinations

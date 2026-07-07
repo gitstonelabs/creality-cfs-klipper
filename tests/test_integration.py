@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 test_integration.py: Integration tests for the CrealityCFS module.
 
@@ -40,6 +41,10 @@ from creality_cfs import (
     CMD_GET_BOX_STATE,
     CMD_SET_PRE_LOADING,
     CMD_GET_VERSION_SN,
+    BOX_STATE_LOADED_B3,
+    BOX_STATE_FEEDING_B3,
+    PRELOAD_MASK_ALL,
+    PRELOAD_PHASE_ARM,
 )
 
 from tests.mock_cfs import MockCFSHardware
@@ -156,7 +161,12 @@ class TestStatusPolling:
 
     @pytest.mark.parametrize("addr", [1, 2, 3, 4])
     def test_status_polling_each_box_returns_state_dict(self, addr):
-        """get_box_state() for each addr returns dict with state, raw, addr keys."""
+        """get_box_state() for each addr returns the v1.4.0 decode dict.
+
+        v1.4.0: the old state/state_str/class_byte keys are gone (wire-disproven
+        decode); the corrected dict carries fw_base/substatus/loaded/feeding/event
+        plus raw/addr.
+        """
         hw = MockCFSHardware(box_count=4)
         cfs, _ = make_wired_controller(hw, box_count=4, retry_count=1)
 
@@ -165,15 +175,15 @@ class TestStatusPolling:
 
         # Reset discovery queue for re-use; hw should respond to GET_BOX_STATE
         result = cfs.get_box_state(addr)
-        assert "state" in result
-        assert "raw" in result
-        assert "addr" in result
+        for key in ("fw_base", "substatus", "loaded", "feeding", "event",
+                    "raw", "addr"):
+            assert key in result, f"Missing key: {key}"
         assert result["addr"] == addr
 
     def test_status_polling_raw_is_4_bytes(self):
         """get_box_state() 'raw' field is exactly 4 bytes from the mock response.
 
-        Mock returns [0x1C, 0x14, 0x00, 0x00] per captured frame.
+        Mock returns [0x1C, 0x24, 0x00, d3] (fw_base 0x1C24 + substatus + load flag).
         """
         hw = MockCFSHardware(box_count=1)
         cfs, _ = make_wired_controller(hw, box_count=1, retry_count=1)
@@ -182,20 +192,30 @@ class TestStatusPolling:
         result = cfs.get_box_state(0x01)
         assert len(result["raw"]) == 4
 
-    def test_status_polling_state_byte_matches_second_data_byte(self):
-        """get_box_state() 'state' is the lo byte (data[1]) of the 0x0A state word.
+    def test_status_polling_loaded_flag_tracks_data3(self):
+        """get_box_state() loaded/feeding flags decode data[3] of the 0x0A state word.
 
-        v1.2.0 wire-confirmed decode: the 0x0A payload is [class_byte=data[0]][state=data[1]].
-        The pre-v1.2.0 model read state from data[0]; corrected from the wire (data[1] = the
-        meaningful 0x20=loaded / 0x1f=feeding byte). class_byte is exposed separately.
+        v1.4.0 protocol correction: the pre-v1.4.0 [hi=0x1a class][lo 0x20/0x1f]
+        decode of b0/b1 is WIRE-DISPROVEN (b0/b1 are an opaque drifting firmware
+        base). The real load flag is data[3]: 0x02 = loaded/print-locked, 0x00 =
+        feed/change mode. The mock tracks it via set_loaded().
         """
         hw = MockCFSHardware(box_count=1)
         cfs, _ = make_wired_controller(hw, box_count=1, retry_count=1)
         cfs._run_auto_addressing()
 
+        # Default mock state: feed mode (d3 = 0x00)
         result = cfs.get_box_state(0x01)
-        assert result["state"] == result["raw"][1]
-        assert result["class_byte"] == result["raw"][0]
+        assert result["raw"][3] == BOX_STATE_FEEDING_B3
+        assert result["feeding"] is True
+        assert result["loaded"] is False
+
+        # Print-locked state: d3 = 0x02
+        hw.set_loaded(0)
+        result = cfs.get_box_state(0x01)
+        assert result["raw"][3] == BOX_STATE_LOADED_B3
+        assert result["loaded"] is True
+        assert result["feeding"] is False
 
     def test_status_polling_all_4_boxes_sequential(self):
         """get_box_state() can be called sequentially for all 4 boxes."""
@@ -269,11 +289,14 @@ class TestSingleBoxWorkflow:
         online_count = cfs._run_auto_addressing()
         assert online_count == 1
 
-        # Step 2: Query state. The mock returns the captured word [0x1C, 0x14, 0x00, 0x00];
-        # per the v1.2.0 wire-confirmed decode state=data[1]=0x14 (lo byte), class=0x1C.
+        # Step 2: Query state. The mock returns the word [0x1C, 0x24, 0x00, 0x00].
+        # v1.4.0: b0/b1 are the OPAQUE fw_base (diagnostics only; the old class/state
+        # decode is wire-disproven) and d3=0x00 means feed mode.
         state = cfs.get_box_state(0x01)
-        assert state["state"] == 0x14
-        assert state["class_byte"] == 0x1C
+        assert state["fw_base"] == 0x1C24
+        assert state["substatus"] == 0x00
+        assert state["feeding"] is True
+        assert state["loaded"] is False
 
     def test_single_box_connect_address_set_mode_standby(self):
         """Single-box: init -> set_box_mode(standby=0x00) -> verify ACK."""
@@ -285,13 +308,20 @@ class TestSingleBoxWorkflow:
         assert result is True
 
     def test_single_box_connect_address_set_preload(self):
-        """Single-box: init -> set_pre_loading(mask=0x0F, enable=1) -> verify ACK."""
+        """Single-box: init -> set_pre_loading(mask, PRELOAD_PHASE_ARM) -> verify ACK.
+
+        v1.4.0: the signature is (addr, mask, phase) and the old ENABLE pass-through
+        was INVERTED vs the wire -- ARM is phase 0x00 (the pre-v1.4.0 enable=1 sent
+        the wire DISARM 0x01). True is returned only on a STATUS-0x00 ACK.
+        """
         hw = MockCFSHardware(box_count=1)
         cfs, _ = make_wired_controller(hw, box_count=1, retry_count=1)
 
         cfs._run_auto_addressing()
-        result = cfs.set_pre_loading(0x01, 0x0F, 0x01)
+        result = cfs.set_pre_loading(0x01, PRELOAD_MASK_ALL, PRELOAD_PHASE_ARM)
         assert result is True
+        # The mock stores the mask byte it received (data[0])
+        assert hw.get_box_pre_loading(0) == PRELOAD_MASK_ALL
 
     def test_single_box_connect_version_query(self):
         """Single-box: init -> get_version_sn -> returns non-empty string."""

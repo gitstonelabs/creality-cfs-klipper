@@ -42,6 +42,8 @@ pytest tests/test_commands.py -v
 pytest tests/test_integration.py -v
 pytest tests/test_errors.py -v
 pytest tests/test_stubs.py -v
+pytest tests/test_transport.py -v
+pytest tests/test_gcode_handlers.py -v
 ```
 
 ### Exclude slow performance tests
@@ -60,13 +62,15 @@ pytest tests/ -m integration
 
 | File | Category | Tests | Purpose |
 |---|---|---|---|
-| `test_crc.py` | unit | 30+ | CRC-8/SMBUS algorithm: 16 vectors, edge cases, SMBUS check value, performance |
-| `test_messages.py` | unit | 40+ | `build_message()` and `parse_message()`: format, captured frames, round-trip |
-| `test_commands.py` | unit | 45+ | Per-command message format, success/failure paths, boundary values |
-| `test_integration.py` | integration | 25+ | Full workflows: init, polling, version query, address allocation |
-| `test_errors.py` | integration | 20+ | Timeouts, retries, CRC errors, malformed frames, serial exceptions |
-| `test_stubs.py` | unit | 12 | NotImplementedError for 0x10/0x11, error message content |
-| `mock_cfs.py` | helper | n/a | `MockCFSHardware`: CRC-validating simulator for all 9 commands |
+| `test_crc.py` | unit | 15 | CRC-8/SMBUS algorithm: 16 vectors, edge cases, SMBUS check value, performance |
+| `test_messages.py` | unit | 43 | `build_message()` and `parse_message()`: format, captured frames, round-trip |
+| `test_commands.py` | unit | 53 | Per-command message format, success/failure paths, boundary values |
+| `test_integration.py` | integration | 22 | Full workflows: init, polling, version query, address allocation |
+| `test_errors.py` | integration | 21 | Timeouts, retries, CRC errors, malformed frames, serial exceptions |
+| `test_stubs.py` | unit | 22 | 0x10/0x11 choreography: sensor-gated load loop, START/FINISH unload pair, wheel-float decode, watchdogs |
+| `test_transport.py` | unit | 52 | Non-blocking reactor serial transport: fd callback, frame resync, waiter matching |
+| `test_gcode_handlers.py` | unit | 37 | `cmd_CFS_*` G-code handlers against a mocked `gcmd` |
+| `mock_cfs.py` | helper | n/a | `MockCFSHardware`: CRC-validating simulator answering the full v1.4.0 command set |
 
 ---
 
@@ -74,13 +78,16 @@ pytest tests/ -m integration
 
 Target: **>80%** of `creality_cfs.py`
 
-The following code paths are intentionally excluded from coverage:
+The following code paths are intentionally excluded from coverage (see
+`.coveragerc` `exclude_lines`):
 - `load_config()`: requires a live Klipper config object
-- G-code handlers (`cmd_CFS_*`): require `gcmd` mock; covered by integration plan
-- `extrude_process()` / `retrude_process()`: raise NotImplementedError (no payload)
+- The `register_event_handler` registration lines: require a live klippy event
+  system
 
-The `raise NotImplementedError` lines in stubs are excluded via `.coveragerc`
-`exclude_lines` because they cannot be exercised without knowing the payload.
+G-code handlers (`cmd_CFS_*`) are covered by `test_gcode_handlers.py` against a
+mocked `gcmd`; `extrude_process()` / `retrude_process()` are fully implemented
+since v1.4.0 and covered by `test_stubs.py` (the filename is historical, from
+when 0x10/0x11 were stubs).
 
 ---
 
@@ -95,6 +102,11 @@ The vectors confirm:
 - Algorithm: CRC-8/SMBUS (poly=0x07, init=0x00, no reflection, no final XOR)
 - Scope: `msg[2:-1]` (LENGTH byte through last DATA byte, excludes HEAD+ADDR+CRC)
 - Standard SMBUS check value: `crc8_cfs(b"123456789") == 0xF4`
+
+They validate the CRC algorithm and frame geometry only. They say nothing
+about function-code identity across printer families; the K1-family firmware
+is a CAN build that remaps several function codes, so K1/K1C/K2 compatibility
+remains untested.
 
 ---
 
@@ -133,24 +145,14 @@ Supported error types:
 
 ## Known Gaps
 
-### 0x10 CMD_EXTRUDE_PROCESS and 0x11 CMD_RETRUDE_PROCESS
+### Hardware confirmation of the v1.4.0 choreography port
 
-These commands are **not testable** because their payload format is locked inside
-the Creality `.so` binary and was not recoverable during reverse engineering.
-
-Both methods raise `NotImplementedError` with a message directing you to capture
-RS485 traffic on `/dev/ttyS5` during a T0-T3 tool-change.
-
-The stubs are tested in `test_stubs.py` to confirm they raise correctly with
-a helpful error message.
-
-### G-code handlers
-
-`cmd_CFS_INIT`, `cmd_CFS_STATUS`, `cmd_CFS_VERSION`, `cmd_CFS_SET_MODE`,
-`cmd_CFS_SET_PRELOAD`, and `cmd_CFS_ADDR_TABLE` require a `gcmd` mock
-matching the Klipper GCodeCommand interface.  These are excluded from this
-suite but can be added by mocking `gcmd.get_int`, `gcmd.respond_info`, and
-`gcmd.error`.
+The 0x10 load and 0x11 unload choreography implemented here was
+hardware-validated on the reference implementation this module ports from
+(same wire protocol, Creality Hi + CFS v1). This module's port of it is
+wire-faithful and fully covered by the mock-based suite (`test_stubs.py`),
+but it has not yet been exercised on hardware itself. A live CFS load/unload
+run on this module is the remaining validation step.
 
 ---
 

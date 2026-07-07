@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 CFS RS485 Traffic Capture Tool
 
@@ -45,10 +46,18 @@ FUNC_NAMES: dict = {
     0xA0: "CMD_SET_SLAVE_ADDR",
     0xA2: "CMD_ONLINE_CHECK",
     0xA3: "CMD_GET_ADDR_TABLE",
+    0x02: "CMD_READ_MATERIAL",
+    0x03: "CMD_READ_REMAIN",
     0x04: "CMD_SET_BOX_MODE",
+    0x05: "CMD_CUT_STATE",
+    0x08: "CMD_GET_HARDWARE_STATUS",
     0x0A: "CMD_GET_BOX_STATE",
+    0x0C: "CMD_GET_BUFFER_STATE",
     0x0D: "CMD_SET_PRE_LOADING",
+    0x0E: "CMD_MEASURING_WHEEL",
+    0x0F: "CMD_CTRL_CONNECTION_MOTOR_ACTION",
     0x14: "CMD_GET_VERSION_SN",
+    0xF0: "CMD_VERSION_INFO",
     0x10: "CMD_EXTRUDE_PROCESS",  # TARGET
     0x11: "CMD_RETRUDE_PROCESS",  # TARGET
 }

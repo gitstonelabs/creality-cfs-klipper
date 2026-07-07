@@ -1,7 +1,7 @@
 # Creality Filament System (CFS) Klipper Integration Installation Guide
 
-**Module version:** 1.1.1 (beta)
-**Protocol confidence:** all commands confirmed against live RS485 capture
+**Module version:** 1.4.0 (beta)
+**Protocol confidence:** all commands confirmed against live RS485 capture; the v1.4.0 choreography is a wire-faithful port of a reference implementation hardware-validated on a Creality Hi + CFS v1 (not yet exercised on hardware from this module itself)
 **Klipper compatibility:** v0.11.0+
 
 > For a visually-illustrated quickstart with wiring diagrams, see [`INSTALL.md`](../INSTALL.md) at the repo root.
@@ -16,7 +16,7 @@
 4. [First-Boot Testing](#4-first-boot-testing)
 5. [G-code Command Reference](#5-g-code-command-reference)
 6. [Known Limitations](#6-known-limitations)
-7. [Unlocking 0x10/0x11 (EXTRUDE/RETRUDE)](#7-unlocking-0x100x11-extruderetrude)
+7. [Capturing new commands](#7-capturing-new-commands-for-future-protocol-work)
 8. [Troubleshooting](#8-troubleshooting)
 
 ---
@@ -25,9 +25,10 @@
 
 - Klipper v0.11.0 or later installed and running.
 - Python 3.7+ (included with standard Klipper installations).
-- `pyserial` installed (`pip3 install pyserial` or already present on Creality boards).
-- RS485 serial port accessible at `/dev/ttyS5` (Creality K2 Plus default) or `/dev/ttyUSB0`.
+- No pyserial needed: since v1.3.0 the module uses its own non-blocking reactor serial transport.
+- RS485 serial port accessible at `/dev/ttyS5` (Creality Hi mainboard default) or a USB-RS485 adapter at `/dev/ttyUSB0`.
 - The CFS hub powered on and connected via the RS485 cable to the host board.
+- A toolhead `[filament_switch_sensor]`, strongly recommended: it gates the load and unload choreography.
 
 ---
 
@@ -63,7 +64,7 @@ Add the following section to your `printer.cfg`. Minimum required configuration:
 serial_port: /dev/ttyS5
 ```
 
-Full configuration with all options:
+Core configuration for the normal single-CFS setup:
 
 ```ini
 [creality_cfs]
@@ -71,9 +72,15 @@ serial_port: /dev/ttyS5
 baud: 230400
 timeout: 0.1
 retry_count: 3
-box_count: 4
+box_count: 1                        # CONTROLLERS in the daisy chain, not slots;
+                                    # one CFS (four slots) = 1
 auto_init: True
+filament_sensor: filament_sensor    # toolhead switch that gates loads/unloads
+extrude_temp: 220                   # M109 melt guard before any filament move
 ```
+
+The optional cutter, flush, and load-tuning options are documented inline in
+`configs/printer.cfg.example`.
 
 To include the macros file, add this line anywhere in `printer.cfg`:
 
@@ -141,12 +148,11 @@ CFS_STATUS
 Expected output:
 
 ```
-Box 1 (0x01): state=0x1C raw=1c140000
-Box 2 (0x02): state=0x1C raw=1c140000
+Box 1 (0x01): FEEDING raw=1c240000
 ...
 ```
 
-The exact state codes are hardware-dependent. Any response without an error confirms the boxes are communicating.
+The state is decoded from data byte 3 of the 0x0A reply (0x02 = LOADED/print-locked, 0x00 = FEEDING/change mode). The first two raw bytes are an opaque per-firmware base and vary between boxes; any response without an error confirms the boxes are communicating.
 
 ### Step 5: View the address table
 
@@ -163,14 +169,19 @@ This prints all address slots, their UniIDs, online state, and mode.
 | Command | Parameters | Description |
 |---------|-----------|-------------|
 | `CFS_INIT` | none | Run full 5-step auto-addressing sequence |
-| `CFS_STATUS` | `[BOX=1-4]` | Query GET_BOX_STATE; omit BOX for all boxes |
+| `CFS_STATUS` | `[BOX=1-4]` | Query GET_BOX_STATE (0x0A); omit BOX for all boxes |
 | `CFS_VERSION` | `[BOX=1-4]` | Query GET_VERSION_SN; omit BOX for all boxes |
 | `CFS_FW_VERSION` | `BOX=1-4` | Query 0xF0 firmware version string |
-| `CFS_SET_MODE` | `BOX=1-4 MODE=0-255 [PARAM=0-255]` | Set box operating mode |
-| `CFS_SET_PRELOAD` | `BOX=1-4 MASK=0-255 ENABLE=0\|1` | Configure pre-loading slots |
-| `CFS_EXTRUDE` | `BOX=1-4` | Load filament from CFS to toolhead (streams position feedback) |
-| `CFS_RETRUDE` | `BOX=1-4` | Retract filament back into CFS box |
+| `CFS_SET_MODE` | `BOX=1-4 [TOOL=0-3] [MODE=0-255 PARAM=0-255]` | Per-slot print mode via TOOL, or the raw enter form via MODE/PARAM |
+| `CFS_SET_PRELOAD` | `BOX=1-4 MASK=0-255 ENABLE=0\|1` | ENABLE=1 arms (wire phase 0x00), ENABLE=0 disarms; advanced `PHASE=0-2` for the blocking per-slot re-arm |
+| `CFS_EXTRUDE` | `TOOL=0-3 [BOX=1-4] [TEMP=C]` | Full sensor-gated load to the toolhead (M109 melt guard, 0x10 push loop gated on the toolhead filament switch) |
+| `CFS_RETRUDE` | `TOOL=0-3 [BOX=1-4] [TEMP=C]` | Full unload (0x11 START/FINISH pair, one interleaved toolhead pull, complete when the switch clears) |
+| `CFS_CUT` | `[BOX=1-4] [TEMP=C]` | Mechanical cut ram; requires `cut_switch_pin` and the cut geometry in `[creality_cfs]` |
+| `CFS_FLUSH` | `[BOX=1-4] [LEN=\|VOLUME=] [VELOCITY=] [TEMP=]` | Hotend purge loop with per-cycle cap and clog watchdog |
 | `CFS_ADDR_TABLE` | none | Print current address assignment table |
+
+`TOOL=` selects the slot bitmask (T0..T3 = 0x01/0x02/0x04/0x08) on ONE controller; `BOX=`
+selects the controller bus address and only matters for multi-box daisy-chains (default 1).
 
 ### Macro commands (from cfs_macros.cfg)
 
@@ -179,23 +190,30 @@ This prints all address slots, their UniIDs, online state, and mode.
 | `CFS_INITIALIZE` | Wrapper for CFS_INIT with logging |
 | `CFS_CHECK_STATUS` | Query all box states with logging |
 | `CFS_GET_VERSIONS` | Query all box versions with logging |
-| `CFS_PRINT_START` | Pre-print: initialize + check status |
-| `CFS_PRINT_END` | Post-print: retract filament from all boxes |
-| `CFS_ENABLE_PRELOAD` | Enable pre-loading on all boxes, all slots |
-| `CFS_DISABLE_PRELOAD` | Disable pre-loading on all boxes, all slots |
-| `T0` / `T1` / `T2` / `T3` | Tool-change to box 1 / 2 / 3 / 4 (auto-retracts previous tool) |
+| `CFS_PRINT_START` | Pre-print: check status + arm pre-loading |
+| `CFS_PRINT_END` | Post-print: unload the active tool and disarm pre-loading |
+| `CFS_ENABLE_PRELOAD` | Arm pre-loading on all slots of the controller |
+| `CFS_DISABLE_PRELOAD` | Disarm pre-loading on all slots of the controller |
+| `T0` / `T1` / `T2` / `T3` | Tool-change to slot 0-3 on the controller at BOX=1 (cut if enabled, unload the previous slot, load the new one). Tools are slots, not bus addresses |
 
 ---
 
 ## 6. Known Limitations
 
-### Streaming poll count is fixed (`EXTRUDE_POLL_MAX=8`)
+### Choreography not yet hardware-exercised from this module
 
-`CFS_EXTRUDE` currently polls the position-feedback stream a fixed 8 times. In production the Creality host polls until position stabilizes (~398–400 mm). A future module version should poll until `delta < EXTRUDE_SETTLE_THRESHOLD` for N consecutive reads. For 99 % of cases the fixed count is sufficient because the filament path is short.
+The v1.4.0 load/unload/cut/flush choreography is a wire-faithful port of a reference
+implementation that WAS hardware-validated (Creality Hi + CFS v1, same wire protocol).
+This module's port has not itself been exercised on hardware yet. The load is
+sensor-gated: without a toolhead `[filament_switch_sensor]` configured via
+`filament_sensor`, a load runs a single ungated cycle and cannot confirm arrival.
 
 ### Half-duplex RS485 direction switching
 
-The module does not manually toggle RTS. Creality's RS485 hardware (and CH341 USB-RS485 dongles) handle direction switching automatically. If you're using a third-party adapter that requires manual RTS control, you'll need to modify `_connect_serial()` to enable `serial.rs485.RS485Settings()`.
+The module does not toggle RTS by default. Creality's RS485 hardware (and CH341 USB-RS485
+dongles) handle direction switching automatically. For an adapter or UART that needs the
+kernel RS485 RTS-as-DE mode, set `rts_on_send: 1` (or `0` for RTS-low-on-send) in
+`[creality_cfs]`; the default `-1` leaves the UART alone.
 
 ### Broadcast discovery may miss boxes
 
@@ -205,7 +223,7 @@ The discovery step sends one `CMD_GET_SLAVE_INFO` broadcast per expected box slo
 
 ## 7. Capturing new commands (for future protocol work)
 
-`0x10 EXTRUDE_PROCESS` and `0x11 RETRUDE_PROCESS` are now fully implemented in v1.1.0. If you discover additional undocumented function codes during operation, capture them with the tools below and open an issue.
+`0x10 EXTRUDE_PROCESS` and `0x11 RETRUDE_PROCESS` have been implemented since v1.1.0 and were rebuilt to the hardware-validated choreography (sensor-gated load, START/FINISH unload) in v1.4.0. If you discover additional undocumented function codes during operation, capture them with the tools below and open an issue.
 
 ### Method 1: interceptty (software)
 
@@ -273,7 +291,7 @@ Attach the raw hex bytes, what operation triggered them, and the CFS firmware ve
 
 ### Motor jam / MOTOR_LOAD_ERR (0x22)
 
-**Symptom:** `CFS_STATUS` returns state byte 0x22
+**Symptom:** a command reply carries response state 0x22 (MOTOR_LOAD_ERR) in klippy.log, or loads stall with no wheel advance
 
 **Steps:**
 1. Open the CFS box and check for jammed filament at the drive gear.
@@ -283,14 +301,10 @@ Attach the raw hex bytes, what operation triggered them, and the CFS firmware ve
 
 ### Module fails to load (ImportError: No module named 'serial')
 
-**Steps:**
-```bash
-pip3 install pyserial
-# or
-sudo apt-get install python3-serial
-```
-
-Then restart Klipper: `sudo systemctl restart klipper`
+Since v1.3.0 the module does not import pyserial at all (it uses a non-blocking
+reactor-fd transport). If you see this error you are running a pre-1.3.0 copy of
+`creality_cfs.py`; replace it with the current version from this repo and restart
+Klipper: `sudo systemctl restart klipper`
 
 ### Module not appearing in klippy.log
 

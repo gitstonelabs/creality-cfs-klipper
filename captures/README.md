@@ -27,29 +27,34 @@ kill %1
 on a Creality Hi with 3 of 4 slots loaded (ABS filament). Captured using a
 Jetson Orin Nano running mainline Klipper as a passive sniffer.
 
+Function-code labels below use the corrected map (see docs/protocol.md). Earlier
+revisions of this README used a since-disproven map that had 0x08 as box-state
+and 0x0A as LOADER_TO_APP; the frame counts are unchanged, only the names moved.
+
 **Contains:**
-- Full auto-addressing boot sequence (0xA2, 0xA1, 0x0A, 0xA0, 0xA3)
+- Full auto-addressing boot sequence (0xA2, 0xA1, 0x0B, 0xA0, 0xA3)
 - CMD_VERSION_INFO (0xF0): firmware version strings for CFS box and motor controller
 - CMD_GET_VERSION_SN (0x14): version/serial number string
-- CMD_GET_BOX_STATE (0x08): state polling throughout sequence
+- CMD_GET_BOX_STATE (0x0A): continuous state polling throughout the sequence
+- CMD_GET_HARDWARE_STATUS (0x08): toolhead filament-sensor flag reads
 - CMD_SET_BOX_MODE (0x04): mode transitions before/after tool changes
 - CMD_SET_PRE_LOADING (0x0D): slot configuration
-- CMD_GET_RFID (0x02): RFID queries (returned "unknown", RFID board disconnected)
-- **CMD_EXTRUDE_PROCESS (0x10)**: complete sequence with all three sub-commands,
-  multiple tool changes, full streaming position feedback
+- CMD_READ_MATERIAL (0x02): material map queries (returned "unknown", RFID board disconnected)
+- **CMD_EXTRUDE_PROCESS (0x10)**: complete load stage sequences across multiple
+  tool changes, with measuring-wheel feedback in the push replies
 - **CMD_RETRUDE_PROCESS (0x11)**: multiple retract cycles
-- CMD_GET_REMAIN_LEN (0x0F): remaining filament queries
+- CMD_CTRL_CONNECTION_MOTOR_ACTION (0x0F): connection motor engage/release
 
 **Key frame counts:**
 ```
-cmd 0x02 = 11 frames   (GET_RFID)
-cmd 0x03 = 6 frames    (unknown)
+cmd 0x02 = 11 frames   (READ_MATERIAL)
+cmd 0x03 = 6 frames    (READ_REMAIN)
 cmd 0x04 = 18 frames   (SET_BOX_MODE)
-cmd 0x08 = 18 frames   (GET_BOX_STATE)
-cmd 0x0a = 1650 frames (LOADER_TO_APP, boot sequence)
+cmd 0x08 = 18 frames   (GET_HARDWARE_STATUS)
+cmd 0x0a = 1650 frames (GET_BOX_STATE, continuous polling)
 cmd 0x0b = 2 frames    (LOADER_TO_APP broadcast)
 cmd 0x0d = 13 frames   (SET_PRE_LOADING)
-cmd 0x0f = 6 frames    (GET_REMAIN_LEN)
+cmd 0x0f = 6 frames    (CTRL_CONNECTION_MOTOR_ACTION)
 cmd 0x10 = 114 frames  (EXTRUDE_PROCESS, primary target)
 cmd 0x11 = 10 frames   (RETRUDE_PROCESS, primary target)
 cmd 0x14 = 4 frames    (GET_VERSION_SN)
@@ -62,11 +67,17 @@ cmd 0xf0 = 28 frames   (VERSION_INFO)
 ```
 
 **What was decoded from this capture:**
-- CMD_EXTRUDE_PROCESS (0x10) sub-commands and response format (see protocol.md)
-- CMD_RETRUDE_PROCESS (0x11) payload confirmed
-- CMD_GET_BOX_STATE corrected from 0x0A to 0x08
+- CMD_EXTRUDE_PROCESS (0x10) stage bytes and reply frames (the original
+  `[state][uint16 position]` read of the push replies was later shown to be a
+  misparse of a 4-byte big-endian IEEE-754 wheel float; see docs/protocol.md)
+- CMD_RETRUDE_PROCESS (0x11) frames, later resolved as the `[slot][phase]`
+  START/FINISH pair
+- First draft of the function-code map. The "box-state is 0x08" reading made
+  here was later disproven: 0x0A is GET_BOX_STATE, 0x08 is GET_HARDWARE_STATUS
 - STATUS=0xFF for operational commands confirmed
-- Filament path length confirmed: ~398-400mm
+- Filament path length ~398-400 mm from box motor to toolhead sensor (survives
+  as a physical fact; the per-frame position profile it was first read from was
+  the misparse above)
 - CFS firmware version strings decoded from 0xF0 frames
 
 ---
@@ -80,7 +91,7 @@ a retract sequence. Captured to determine whether buffer switch triggers
 generate RS485 traffic.
 
 **Contains:**
-- CMD_GET_BOX_STATE (0x08) polling
+- CMD_GET_BOX_STATE (0x0A) polling
 - CMD_SET_BOX_MODE (0x04): mode transition
 - CMD_RETRUDE_PROCESS (0x11): one retract cycle
 - Auto-addressing polling (0xA1, 0xA2)
@@ -88,18 +99,18 @@ generate RS485 traffic.
 **Key finding:** Buffer switch triggers generate **no RS485 traffic**.
 The buffer state is communicated via direct GPIO lines (pins 2 and 3 on the
 6-pin connector), not over RS485. This means:
-- No RS485 command is needed to read buffer state
-- `BOX_GET_BUFFER_STATE` from box_wrapper.so strings may not exist as an RS485
-  command, or it reads the GPIO state via a different mechanism
+- No RS485 command is needed to read the buffer SWITCH state
+- `GET_BUFFER_STATE` (0x0C) does exist on the wire, but it is addressed to the
+  buffer node (0x81+) and returns an 8-byte block; the switch itself is GPIO
 - Buffer integration on any Klipper host uses `[filament_switch_sensor]` on a
   GPIO pin wired to pin 2 or 3 of the CFS connector
 
-**BOX_STATE values observed:**
-```
-0x0F = IDLE   (standby, normal polling)
-0x00 = BUSY   (transitioning)
-0x02 = ACTIVE (during retract sequence)
-```
+**Correction on the "BOX_STATE values" once listed here:** earlier revisions
+reported single-byte state values (0x0F idle, 0x00 busy, 0x02 active) read from
+the final byte of what were thought to be box-state frames. Under the corrected
+frame geometry (total = 3 + LEN bytes, CRC last) that final byte is the CRC, so
+those values were not state at all. The real box-state is the 0x0A 4-byte word
+with the `b3` load flag; see docs/protocol.md.
 
 ---
 
@@ -116,9 +127,10 @@ while i < len(data) - 5:
         length = data[i+2] if i+2 < len(data) else 0
         cmd = data[i+4] if i+4 < len(data) else 0
         status = data[i+3]
-        frame = data[i:i+length+2]
+        # LEN counts STATUS+FUNC+DATA+CRC, so total frame = 3 + LEN
+        frame = data[i:i+length+3]
         frames.append((i, data[i+1], status, cmd, frame))
-        i += max(length+2, 1)
+        i += max(length+3, 1)
     else:
         i += 1
 
@@ -127,7 +139,7 @@ from collections import Counter
 for cmd, count in sorted(Counter(f[3] for f in frames).items()):
     print(f'cmd {cmd:#04x} = {count} frames')
 
-# Show all non-addressing frames
+# Show everything except addressing and box-state polling
 for offset, addr, status, cmd, frame in frames:
     if cmd not in {0xa0, 0xa1, 0xa2, 0xa3, 0x0a}:
         direction = 'REQ' if status == 0xff else 'RSP'
@@ -138,16 +150,18 @@ for offset, addr, status, cmd, frame in frames:
 Filter for specific commands:
 
 ```python
-# Show only 0x10 EXTRUDE_PROCESS frames
+# Show only 0x10 EXTRUDE_PROCESS frames. Push replies carry a 4-byte
+# big-endian IEEE-754 measuring-wheel float (negative; magnitude grows
+# as filament feeds). The old [state 0xC3/0xC4][uint16 position] read
+# of these bytes was a misparse of that float.
+import struct
 for offset, addr, status, cmd, frame in frames:
     if cmd == 0x10:
         direction = 'REQ' if status == 0xff else 'RSP'
         payload = frame[5:-1]
-        if direction == 'RSP' and len(payload) == 3:
-            state = payload[0]
-            pos = (payload[1] << 8) | payload[2]
-            state_str = 'ACCEL' if state == 0xc3 else 'SPEED'
-            print(f'{offset:#06x} RSP state={state_str} pos={pos/100:.2f}mm')
+        if direction == 'RSP' and len(payload) == 4:
+            wheel = struct.unpack('>f', payload)[0]
+            print(f'{offset:#06x} RSP wheel={wheel:.2f}')
         else:
             print(f'{offset:#06x} {direction} payload={payload.hex()}')
 ```

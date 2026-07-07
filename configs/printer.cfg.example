@@ -2,7 +2,9 @@
 # Creality Filament System (CFS): printer.cfg configuration example
 # =============================================================================
 #
-# Protocol: CFS RS485 v1 (validated on Creality Hi, K1, K1C, K2 Plus, K2 Max)
+# Protocol: CFS RS485 v1 (hardware-validated on the Creality Hi; the K1-family
+#           firmware is a CAN build with REMAPPED function codes, so K1/K1C/K2
+#           compatibility over RS485 is UNTESTED -- do not assume it)
 # Baud rate: 230400 (validated by captured traffic; do not change)
 # CRC: CRC-8/SMBUS (poly=0x07, init=0x00) validated against 16/16 vectors
 #
@@ -35,27 +37,67 @@
 [creality_cfs]
 serial_port: /dev/ttyS5
 #   RS485 serial port connected to the CFS hub.
-#   Validated: Creality Hi (UART5), K1/K1C (UART5), K2 Plus/K2 Max (UART5).
-#   Other Allwinner-based Klipper hosts may also expose this as /dev/ttyS5.
+#   Validated: Creality Hi (UART5). Other Allwinner-based hosts may expose the
+#   same node; on a non-Creality host use Option B (USB-RS485) below.
 
 baud: 230400
 #   Serial baud rate. Validated by captured traffic. Do not change.
 
 timeout: 0.1
-#   Default command timeout in seconds for operational commands.
-#   Note: auto-addressing discovery (CMD_GET_SLAVE_INFO) always uses 1.0 s.
+#   Default command timeout in seconds for short query commands.
+#   The choreography commands manage their own (much longer) per-stage timeouts:
+#   the box HOLDS 0x10/0x11 replies until each mechanical step finishes.
 
 retry_count: 3
-#   Retry attempts for failed (no-response or CRC-error) commands.
-#   Addressing commands use 1 retry regardless.
+#   Retry attempts for failed (no-response or CRC-error) query commands.
+#   Choreography stage frames are always single-shot (stock behavior).
 
-box_count: 4
-#   Number of CFS boxes (1-4) expected in the daisy chain.
-#   If fewer are present, init logs a warning and continues with what responded.
+box_count: 1
+#   Number of CFS CONTROLLERS (1-4) in the daisy chain -- NOT tool slots.
+#   One CFS = one controller with four slots = box_count: 1 (the normal case).
+#   Only a physically chained second unit raises this.
 
 auto_init: True
 #   Run CFS_INIT automatically on klippy:ready.
 #   Set False if you want to control timing manually.
+
+filament_sensor: filament_sensor
+#   Name of the TOOLHEAD [filament_switch_sensor <name>] section. This switch
+#   gates the load (feed until it trips) and the unload (done when it clears).
+#   STRONGLY recommended -- without one, loads run a single ungated cycle and
+#   cannot confirm the filament arrived.
+
+extrude_temp: 220
+#   Default melt temperature for loads/unloads/flushes/cuts. Every filament
+#   move blocks on M109 to this first (>= 170C floor). Override per-material
+#   with TEMP= on CFS_EXTRUDE/CFS_RETRUDE/CFS_FLUSH/CFS_CUT.
+
+#load_max_bursts: 5
+#   Per-arm 0x05 push cap during a load (the box self-limits to ~3 real pushes
+#   per arm; the loop re-arms automatically).
+
+#load_wall_budget: 90
+#   Wall-clock ceiling (s) for the whole sensor-gated load.
+
+# ---- Optional: filament cutter (needed for CFS_CUT) -------------------------
+#cut_switch_pin: !toolhead_mcu:PB1
+#   The cutter microswitch/hall pin. CFS_CUT REFUSES to run without this (a
+#   blind ram with no switch could crash the toolhead). The pin itself is only
+#   a config guard here; wire it to a [gcode_button] if you want to read it.
+#pre_cut_pos_x: 240
+#pre_cut_pos_y: 130
+#cut_pos_x: 283.5
+#cut_pos_x_max: 285
+#cut_velocity: 3000
+
+# ---- Optional: flush tuning --------------------------------------------------
+#nozzle_volume: 183
+#   Melt-zone volume (mm^3); flush base length = nozzle_volume / 2.4.
+#nozzle_clean_macro: WIPE_NOZZLE
+#   A [gcode_macro] run once per flush cycle (your wipe routine).
+#flush_cycle_cap: 80
+#flush_default_len: 140
+#flush_velocity: 360
 
 
 # ---- Option B: USB-RS485 adapter (non-Creality printer or USB host) --------

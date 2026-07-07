@@ -33,26 +33,23 @@ sudo systemctl restart klipper
 
 ---
 
-### pyserial Not Installed
+### ModuleNotFoundError: No module named 'serial'
 
 **Symptom:**  
-Error when starting Klipper or running tests:
+Error when starting Klipper:
 
 ```
 
 ModuleNotFoundError: No module named 'serial'
 
-````
+```
 
 **Solution:**
 
-Install pyserial in your Klipper environment:
-
-```bash
-~/klippy-env/bin/pip install pyserial
-````
-
-Then restart Klipper.
+Since v1.3.0 the module does not use pyserial at all; it has its own non-blocking
+reactor serial transport. This error means you are running a pre-1.3.0 copy of
+`creality_cfs.py`. Replace it with the current version from this repo, then
+restart Klipper.
 
 ***
 
@@ -115,29 +112,37 @@ CFS_INIT reports “0 boxes found”.
 
 *   Power cycle the CFS units.
 *   Check RS485 wiring and ensure common ground.
+*   Note the box slave-MCU needs roughly 9.5 s to wake after addressing; the module
+    retries the first state probe, but run CFS_INIT again if a box stays offline.
 *   Try querying known addresses directly:
-        CFS_STATUS ADDR=1
+        CFS_STATUS BOX=1
 
 ***
 
 ## Command Errors
 
-### NotImplementedError for 0x10 or 0x11
-
-**Symptom:**  
-Error message when calling filament load/unload commands.
+### CFS_EXTRUDE / CFS_RETRUDE fail or time out
 
 **Explanation:**  
-These commands are defined but not yet implemented. The payload structure is unknown and must be captured from live RS485 traffic.
+The 0x10 load and 0x11 unload are fully implemented (since v1.1.0, rebuilt in v1.4.0
+to the hardware-validated choreography). Both are gated on the TOOLHEAD filament
+switch: the load feeds until the switch trips, the unload completes when it clears.
+The box also HOLDS each stage reply until the mechanical step finishes (up to ~10 s),
+so long per-stage waits are normal.
 
 **Suggested Fixes:**
 
-*   Use the capture tool:
+*   Configure `filament_sensor:` in `[creality_cfs]` to your toolhead
+    `[filament_switch_sensor]` name and verify the switch actually toggles
+    (QUERY_FILAMENT_SENSOR) when filament passes it.
+*   Check the hotend heats: every load/unload blocks on M109 first
+    (`extrude_temp`, or TEMP= on the command).
+*   If a load times out with the switch never tripping, check for a jam at the
+    4-way splitter or an uncut filament tip.
+*   If it still fails, capture the traffic and open an issue:
     ```bash
     python3 tools/capture_cfs_traffic.py --port /dev/ttyUSB0 --baud 230400
     ```
-*   Trigger a T0–T3 tool change on the printer to capture 0x10/0x11 traffic.
-*   Share findings via GitHub Issues or Discussions.
 
 ***
 

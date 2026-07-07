@@ -132,6 +132,48 @@ vary between manufacturers and the labeling can be misleading.
 
 ---
 
+## Passive bus tap for capture (logic analyzer, scope, or sniffer)
+
+To watch the wire (protocol capture, timing analysis, or a "did this device
+answer" check) tap the RS485 trio off any 6-pin CFS connector. The reliable
+method is a T-splice on each of the three data wires so the tap sits in parallel
+without breaking the harness. The tap is passive: it only listens, so it does not
+disturb the bus and can coexist with a USB-RS485 sniffer on the same points.
+
+| Tap this | Pin | Wire | Note |
+|----------|-----|------|------|
+| RS485-A | 1 | Red | idles ~1.75V, swings within logic range |
+| GND | 5 | Green | mandatory common reference |
+| RS485-B | 6 | Blue | idles ~1.74V |
+| do NOT tap | 4 | Yellow | **24V power. Never probe this.** |
+
+**Single shared bus, so the tap point does not matter.** The Creality Hi
+mainboard has exactly ONE RS485 transceiver, so every device rides the same A/B
+pair on `/dev/ttyS5`: the CFS boxes (`0x01`-`0x04`), the X and Y closed-loop
+servos (`0x81`/`0x82`), the belt motors (`0x91`/`0x92`), the RFID reader, and the
+`auto_addr` broadcasts. A tap on the CFS 6-pin harness sees the servo and
+cutter-cal traffic exactly as well as a tap at the motor connector, so you do not
+need to open the printer to reach the servos.
+
+**Voltage warning, especially for a logic analyzer.** Pin 4 is 24V. A cheap USB
+logic analyzer (FX2 / fx2lafw clone) has an absolute-maximum input around 5.25V,
+so touching 24V destroys it instantly. Tap only pins 1, 5, and 6.
+
+Logic analyzer channel map (matches the fx2lafw / PulseView capture procedure):
+- D0 to pin 1 (A, red)
+- D1 to pin 6 (B, blue)
+- GND to pin 5 (green)
+- Optional: D2 to pin 2 (white, buffer switch) to correlate the filament-buffer
+  trigger with bus traffic. It is a 3.3V GPIO line, not RS485, and is safe on a
+  spare channel.
+
+Because A and B are a differential pair, a single leg referenced to GND is
+marginal for measuring the idle-to-active turnaround, capture both A and B and
+keep whichever decodes cleanly. A passive USB-RS485 sniffer (FTDI or CH341) uses
+the same three points (A/B/GND) and can share the T-splices with the analyzer.
+
+---
+
 ## Buffer Switch GPIO Wiring
 
 The single filament buffer at the end of the chain reports its state on a separate
@@ -180,20 +222,19 @@ on the Creality Hi toolhead board.
 
 **Alternative (custom toolhead):** Standard 2-wire mechanical microswitch (same
 type as X endstop). Wire signal to GPIO, GND to GND. No VCC needed for mechanical
-switch. In Klipper config use the switch as the `switch_pin` in `[box]`:
+switch. For this module, configure it as `cut_switch_pin` in `[creality_cfs]`
+together with the cut geometry (`pre_cut_pos_x/y`, `cut_pos_x`, `cut_pos_x_max`,
+`cut_velocity`); `CFS_CUT` refuses to run without the pin configured:
 
 ```ini
-[box]
-switch_pin: ^EBB:PA5    # EBB42 Gen2 PROBE port PA5
+[creality_cfs]
+cut_switch_pin: ^EBB:PA5    # EBB42 Gen2 PROBE port PA5
 ```
 
-**Calibrating cutter position:**
-```
-CALIBRATE_CUT_POS
-```
-
-This runs `MOTOR_CHECK_CUT_POS` which moves X to the cut position and reads
-the cutter sensor. The calibrated `cut_pos_x` value is saved to SAVE_CONFIG.
+(On the stock Creality firmware the same switch lives in the `[box]` section and
+is calibrated with `CALIBRATE_CUT_POS`; that command does not exist in this module.
+Find your `cut_pos_x` by jogging X until the cutter lever bottoms out and the
+switch triggers, then set the values in `[creality_cfs]`.)
 
 ---
 

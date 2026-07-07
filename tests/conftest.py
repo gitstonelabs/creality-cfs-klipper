@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 conftest.py: Shared pytest fixtures for the CFS test suite.
 
@@ -87,7 +88,17 @@ from tests.mock_cfs import MockCFSHardware
 
 def _make_fake_config(port="/dev/null", baud=230400, box_count=4,
                       retry_count=3, auto_init=False):
-    """Return a minimal MagicMock that satisfies CrealityCFS.__init__."""
+    """Return a minimal MagicMock that satisfies CrealityCFS.__init__.
+
+    v1.4.0 harness updates:
+      * reactor.monotonic() is a REAL advancing float clock (0.5 s per call). The
+        choreography wall-budget loops (load/unload/flush) compare monotonic() against
+        float deadlines; a bare MagicMock would compare truthy forever (infinite loop).
+      * printer.lookup_object() returns the gcode mock ONLY for "gcode" and the caller's
+        default for everything else, so optional-object probes (filament_switch_sensor,
+        extruder) correctly resolve to None on the bare harness instead of a truthy mock
+        (a truthy sensor mock would fake 'filament detected' on every read).
+    """
     cfg = mock.MagicMock()
 
     # Printer / reactor / gcode sub-objects
@@ -95,8 +106,19 @@ def _make_fake_config(port="/dev/null", baud=230400, box_count=4,
     reactor = mock.MagicMock()
     gcode = mock.MagicMock()
 
+    import itertools
+    _clock = itertools.count()
+    reactor.monotonic.side_effect = lambda: next(_clock) * 0.5
+
+    def _lookup_object(name, default=mock.sentinel.no_default):
+        if name == "gcode":
+            return gcode
+        if default is mock.sentinel.no_default:
+            raise Exception("lookup_object(%r): not present in fake printer" % (name,))
+        return default
+
     printer.get_reactor.return_value = reactor
-    printer.lookup_object.return_value = gcode
+    printer.lookup_object.side_effect = _lookup_object
     cfg.get_printer.return_value = printer
 
     # Config getters

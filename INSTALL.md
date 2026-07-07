@@ -1,14 +1,12 @@
 <div align="center">
 
-<img src="assets/logo.png" alt="gitStoneLabs" width="180">
-
 # Installation Guide
 
 ### Creality CFS Klipper Integration
 
 [![Status](https://img.shields.io/badge/status-beta-00d4ff?style=flat-square)](https://github.com/gitstonelabs/creality-cfs-klipper)
 [![License](https://img.shields.io/badge/license-GPL--3.0-4dd0e1?style=flat-square)](LICENSE)
-[![Hardware](https://img.shields.io/badge/hardware-validated-3fcf8e?style=flat-square)](#)
+[![Protocol](https://img.shields.io/badge/protocol-hardware--validated-3fcf8e?style=flat-square)](#)
 
 </div>
 
@@ -46,7 +44,7 @@ flowchart LR
     subgraph Host["Klipper host (Pi / Jetson / printer mainboard)"]
         direction TB
         K[Klipper] --> M["creality_cfs.py<br/>(this module)"]
-        M --> S[pyserial]
+        M --> S["non-blocking fd transport<br/>(O_NONBLOCK + termios,<br/>reactor.register_fd)"]
     end
     S -->|"/dev/ttyUSB0<br/>or /dev/ttyS5"| A["USB-RS485 adapter<br/>(CH341 confirmed)"]
     A -->|"RS485 A / B / GND<br/>230400 8N1"| B1["CFS Box 1<br/>addr 0x01"]
@@ -58,7 +56,11 @@ flowchart LR
     class B2,B3,B4 opt;
 ```
 
-**Validated on:** Creality Hi (F018), K1, K1C, K2 Plus, K2 Max. The CFS RS485 protocol is identical across the entire Creality printer family. The same module file works for all of them; only `printer.cfg` differs.
+The module needs no pyserial and no pip packages: since v1.3.0 it opens the port itself (`os.open` with `O_NONBLOCK` plus raw 8N1 termios) and registers the fd with Klipper's reactor, so serial waits never block the Klipper event loop. RS485 direction switching is left to an auto-direction adapter by default; kernel RTS-as-DE mode is available via `rts_on_send`.
+
+**Validated on:** Creality Hi (F018) with a CFS v1 box. Transport, CRC, and addressing are capture-validated in this module; the load/unload/cut/flush choreography was hardware-validated on the reference implementation (same wire protocol, same printer), and this module's port of it is wire-faithful but has not yet been exercised on hardware itself.
+
+**K1 / K1C / K2 family: UNTESTED.** The K1-family firmware is a CAN build that remaps several function codes (0x02/0x05/0x08/0x0C), so do not assume the RS485 protocol documented here carries over. Reports from K-series hardware are welcome.
 
 ---
 
@@ -151,6 +153,10 @@ switch_pin: ^EBB:PA2     # any 3.3V GPIO; add ! to invert if it reads backwards
 pause_on_runout: false   # we just want logging, not auto-pause
 ```
 
+### Strongly recommended: toolhead filament sensor
+
+This is a different switch from the buffer sensor above: the filament-runout switch at the **toolhead** that most CFS-capable printers already have. The module uses it to gate the whole load/unload choreography: a load feeds until this switch trips, an unload completes when it clears. Name its `[filament_switch_sensor <name>]` section in the module's `filament_sensor` option (see the config below). Without one, loads run a single ungated feed cycle and cannot confirm the filament actually reached the toolhead.
+
 ---
 
 ## Software install
@@ -196,18 +202,56 @@ baud: 230400
 box_count: 1
 ```
 
-Full config with every option exposed:
+Full config with every option exposed (mirrors `configs/printer.cfg.example`):
 ```ini
 [creality_cfs]
 serial_port: /dev/ttyUSB0
-baud: 230400      # always 230400, non-negotiable for CFS
-timeout: 0.1      # per-byte read timeout
-retry_count: 3    # CRC error retries
-box_count: 1      # 1-4
-auto_init: True   # run CFS_INIT automatically on Klipper start
+baud: 230400              # always 230400, non-negotiable for CFS
+timeout: 0.1              # short-query command timeout; the load/unload
+                          # choreography manages its own longer per-stage timeouts
+retry_count: 3            # retries for failed query commands (choreography
+                          # stage frames are always single-shot, stock behavior)
+box_count: 1              # CFS CONTROLLERS in the daisy chain (1-4), NOT slots;
+                          # one 4-slot CFS = box_count: 1
+auto_init: True           # run CFS_INIT automatically on klippy:ready
+
+filament_sensor: filament_sensor
+#   Name of the TOOLHEAD [filament_switch_sensor <name>] section. This switch
+#   gates the load (feed until it trips) and the unload (done when it clears).
+#   STRONGLY recommended: without one, loads run a single ungated cycle and
+#   cannot confirm the filament arrived.
+
+extrude_temp: 220
+#   Default melt temperature for loads/unloads/flushes/cuts. Every filament
+#   move blocks on M109 to this first (170 C floor). Override per-material
+#   with TEMP= on CFS_EXTRUDE/CFS_RETRUDE/CFS_FLUSH/CFS_CUT.
+
+#load_max_bursts: 5       # per-arm 0x05 push cap during a load (the box
+                          # self-limits to ~3 real pushes per arm; the loop
+                          # re-arms automatically)
+#load_wall_budget: 90     # wall-clock ceiling (s) for the whole sensor-gated load
+
+# Filament cutter (required for CFS_CUT; leave unset if you have no cutter)
+#cut_switch_pin: !toolhead_mcu:PB1   # cutter microswitch/hall pin; CFS_CUT
+                                     # REFUSES to run without it
+#pre_cut_pos_x: 240
+#pre_cut_pos_y: 130
+#cut_pos_x: 283.5
+#cut_pos_x_max: 285       # travel bound on the ram target
+#cut_velocity: 3000
+
+# Flush (CFS_FLUSH) tuning
+#nozzle_volume: 183       # melt-zone volume (mm^3); flush base = nozzle_volume / 2.4
+#flush_multiplier: 1.0    # scales the slicer VOLUME= contribution
+#flush_cycle_cap: 80      # per-cycle purge cap (mm)
+#flush_default_len: 140   # total purge fallback when no LEN=/VOLUME= given
+#flush_velocity: 360
+#nozzle_clean_macro: WIPE_NOZZLE   # optional [gcode_macro] run once per flush cycle
 ```
 
 > 💡 **Prefer `by-id` paths over `/dev/ttyUSB0`** when using USB adapters. `ttyUSB0` can shift when you plug in other USB devices. `ls /dev/serial/by-id/` to find your adapter's stable path.
+
+> 🌡 **Heat-and-wait is by design.** Mainline Klipper keeps the `min_extrude_temp` protection that Creality's fork deletes, and the box-motor feed bypasses Klipper's cold-extrude protection entirely. So every `CFS_EXTRUDE` / `CFS_RETRUDE` / `CFS_FLUSH` / `CFS_CUT` first runs a blocking `M109` to `extrude_temp` (or `TEMP=`) and enforces a 170 C floor. A load that appears to "hang" right after you issue it is usually just the hotend heating.
 
 ### 4. Restart Klipper
 
@@ -273,6 +317,8 @@ CFS auto-addressing complete: 4/4 box(es) online
 
 `0/N online` → check wiring polarity, baud rate, and PSU power.
 
+> ⏱ **Init takes a while by design.** After address assignment the box's slave MCU needs ~9.5 s to wake, so the module probes it with a single 12 s shot (plus bounded retries) before running the connect-init burst; the all-slot presence read alone takes ~11 s. A quiet console for 20-30 s during `CFS_INIT` is normal, not a hang.
+
 ### Step 3: Firmware versions
 
 ```
@@ -291,19 +337,21 @@ CFS_STATUS
 ```
 
 ```
-Box 1 (0x01): state=0x1C raw=1c140000
+Box 1 (0x01): FEEDING raw=1a200000
 ```
 
-`state=0x22` means motor jam. Clear the box and re-run `CFS_INIT`.
+`LOADED` means the box is print-locked to a slot; `FEEDING` means it is in feed/change mode. A `[busy/cal active]` suffix means the box is mid-calibration or mid-retract (normal transiently); `[insert event]` means a spool was just inserted. The raw hex is the 4-byte `GET_BOX_STATE` word; see [state decode](#box-state-decode-from-cfs_status) below for what the bytes mean.
 
 ### Step 5: Test load + retract
 
+Load a spool into slot A (the first slot), then:
+
 ```
-CFS_EXTRUDE BOX=1
-CFS_RETRUDE BOX=1
+CFS_EXTRUDE TOOL=0
+CFS_RETRUDE TOOL=0
 ```
 
-Filament should advance ~400 mm then reverse. If position reports stall around 149 mm or 338 mm, the drive gear is slipping or the filament is jammed.
+`TOOL=` selects the slot (0-3 for A-D); `BOX=` is only needed on multi-controller daisy chains. Both commands first run a blocking `M109` heat-and-wait to `extrude_temp` (default 220 C), so expect the hotend to heat before anything moves. The load then feeds in sensor-gated bursts until the toolhead filament switch trips (~400 mm path on the reference printer); the unload runs the box's start/finish retract pair with one toolhead pull in between, and completes when the switch clears. If the load times out with "filament did not reach the toolhead", check for a jam at the 4-way splitter and confirm `filament_sensor` points at the right switch.
 
 ---
 
@@ -370,20 +418,31 @@ flowchart TD
     class F6 ok;
 ```
 
-### Common state codes (from `CFS_STATUS`)
+### Box state decode (from `CFS_STATUS`)
 
-| Code | Meaning | Action |
+The `GET_BOX_STATE` (0x0A) reply is 4 data bytes `[b0][b1][b2][b3]`:
+
+| Byte | Meaning | Values |
 |---|---|---|
-| `0x1C` | Idle, ready | none |
-| `0x14` | Active load/retract | wait |
-| `0x22` | Motor jam | clear jam, `CFS_INIT` again |
-| `0xFE` | Comm error | check wiring |
+| `b0` `b1` | Opaque firmware base. Drifts per box/firmware (`1a20`, `1b26`, `1c24`, `1d21` all observed on identical hardware). Carries **no** state; never gate on it. | varies |
+| `b2` | Substatus | `0x00` = OK |
+| `b3` | The real load flag | `0x02` = loaded / print-locked, `0x00` = feed/change mode, `0x04` = busy (during a `0x16` event) |
+
+The frame's STATUS byte doubles as the box's async event channel and is surfaced by `CFS_STATUS`:
+
+| Event | Meaning | Action |
+|---|---|---|
+| `0x00` | Idle / steady | none |
+| `0x30` | Insert/update push (spool inserted) | none |
+| `0x16` | Busy / active calibration or retract | wait; only a problem if it never settles |
 
 ---
 
 ## Appendix: Tool-change anatomy
 
-Internally `CFS_EXTRUDE` is a multi-step sequence with streaming position feedback. Understanding this helps when something goes wrong mid-change.
+Internally `CFS_EXTRUDE` and `CFS_RETRUDE` run the full choreography ported from the hardware-validated reference implementation. There is no position streaming and no status polling: the box **holds each stage reply until the mechanical step completes** (init/finalize ~4.5 s, push ~2 s, unload finish ~9.6 s), so the blocking reply itself is the ready signal and per-stage timeouts are sized accordingly (15 s per load stage). Every 0x10/0x11 frame carries the slot as a data-byte bitmask (`T0`-`T3` → `0x01`/`0x02`/`0x04`/`0x08`); the example below uses slot A (`0x01`).
+
+### Load (`CFS_EXTRUDE TOOL=0`)
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{
@@ -397,21 +456,45 @@ sequenceDiagram
     participant M as creality_cfs.py
     participant B as CFS Box
 
-    K->>M: T0 (macro or CFS_EXTRUDE BOX=1)
-    M->>B: SET_MODE(box=1, mode=1)
+    K->>M: T0 (macro or CFS_EXTRUDE TOOL=0)
+    Note over K,M: blocking M109 heat-and-wait first
+    M->>B: SET_BOX_MODE 0x04 [00][01]<br/>enter feed mode
     B-->>M: ACK
-    M->>B: EXTRUDE_PROCESS(0x02/0x00)<br/>init / motor start
+    M->>B: MOTOR_ACTION 0x0F [01] engage feeder
     B-->>M: ACK
-    loop until position stable
-        M->>B: EXTRUDE_PROCESS(0x02/0x05) poll
-        B-->>M: motor_state, position (0.01 mm)
-        Note right of B: 0xC3 = accelerating<br/>0xC4 = at speed
+    M->>B: 0x08 [00] liveness ping (logged, not a gate)
+    loop re-armed cycle, until the toolhead switch trips (90 s budget)
+        M->>B: 0x10 [01][00][00] init / arm
+        B-->>M: reply held ~4.5 s
+        M->>B: 0x10 [01][04][00] engage
+        B-->>M: reply held ~4.5 s
+        loop pushes (box self-limits ~3 real pushes per arm)
+            M->>B: 0x10 [01][05][00] push + measure
+            B-->>M: wheel float (4-byte BE IEEE-754, held ~2 s)
+        end
     end
-    Note over M,B: filament advances<br/>~149 → ~338 → ~400 mm
-    M->>K: tool change complete
+    Note over M,B: toolhead filament switch TRIPPED
+    M->>B: 0x10 [01][06][00] settle
+    B-->>M: ACK
+    M->>B: 0x10 [01][07][03] finalize
+    B-->>M: ACK
+    M->>B: CUT_STATE 0x05 read (diagnostic)
+    M->>B: SET_BOX_MODE 0x04 [01][00] print mode
+    M->>B: MOTOR_ACTION 0x0F [00] release feeder
+    M->>K: load complete
 ```
 
-`CFS_RETRUDE` is the same shape but with sub-command `0x02/0x01` and is single-shot (no streaming).
+The load is **sensor-gated**: the 0x05 push repeats, and the 0x06/0x07 finalize only fires after the toolhead filament switch trips, with the whole cycle re-armed (fresh `[slot] 00 00`) until the switch latches. The 0x05 push reply is the cumulative measuring-wheel position as a 4-byte big-endian IEEE-754 float (negative, magnitude grows as filament feeds); a per-push wheel-advance watchdog detects the box's no-op fast-acks and re-arms early.
+
+### Unload (`CFS_RETRUDE TOOL=0`)
+
+`CFS_RETRUDE` is **not** single-shot. It is a START/FINISH command pair, both frames carrying the slot bitmask, with one toolhead pull interleaved:
+
+1. `0x04 [00][01]` enter feed mode, then a `0x08 [00]` material-sensor read.
+2. **START** `0x11 [01][00]`; the reply arrives after ~12-14 s of real pulling.
+3. One toolhead `G1 E-15 F360` pull (exactly once, values fixed by the reference implementation).
+4. `0x08 [01]` connections read, then **FINISH** `0x11 [01][01]`; the ACK is held ~9.6 s while the box reels the filament fully in.
+5. Completion is gated on the toolhead filament switch **clearing**, not on any reply status; the 0x11 reply statuses are diagnostic only. Whole unload bounded by a 60 s wall budget.
 
 ---
 

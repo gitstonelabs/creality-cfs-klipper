@@ -4,9 +4,56 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+Entries are a historical record and are kept as written. Several decodes that
+pre-1.4.0 entries state as "confirmed" were later disproven by CRC-verified
+captures: box-state is 0x0A, not 0x08; the 0x10 push reply is a 4-byte
+big-endian IEEE-754 measuring-wheel float, not `[motor state 0xC3/0xC4][uint16
+position in 0.01mm]`; the 0x11 unload is a held START/FINISH pair gated on the
+toolhead filament switch, not a one-shot ACK; and the "protocol identical
+across K1/K2/Hi" claim is downgraded to untested (the K1-family firmware is a
+CAN build with remapped function codes). See the 1.4.0 entry below and
+`docs/protocol.md` for the corrected wire truth.
+
 ---
 
 ## [Unreleased]
+
+### Changed (v1.4.0 choreography rebuild from the hardware-validated reference stack, 2026-07-05)
+
+- **`creality_cfs.py` LOAD (0x10) rebuilt sensor-gated.** The fixed 5-stage ramp with the position-settle exit is replaced by the validated model: the `0x05` push REPEATS and the `0x06`/`0x07 03` finalize fires only after the toolhead `[filament_switch_sensor]` trips, with the whole cycle RE-ARMED (fresh `[slot] 00 00`) until the switch latches, a per-push wheel-advance watchdog for the box's ~3-push per-arm self-limit (`LOAD_PUSH_MIN_ADVANCE`/`LOAD_PUSH_STALL_LIMIT`), 15 s blocking per-stage reply timeouts (the box HOLDS each reply until the mechanical step completes; this is the real ready mechanism, not a host poll) and a 90 s wall budget. The `0x10` push reply decode is CORRECTED: the payload is a 4-byte big-endian IEEE-754 wheel float (negative, magnitude-monotonic); the old `[motor state 0xC3/0xC4][uint16 0.01mm]` model was a misparse (the "state" byte was the float's exponent byte). `CFS_EXTRUDE` now runs the full choreography (melt guard, `0x04 [00][slot]` feed-mode entry, `0x0F` engage, one-shot `0x08` ping, gated ramp cycles, `0x05` cut check, `0x04 [slot][00]` print mode, `0x0F` release) and takes a REQUIRED `TOOL=<0-3>`.
+- **`creality_cfs.py` UNLOAD (0x11) rebuilt to the START/FINISH pair.** `[slot][00]` then `[slot][01]`, BOTH frames carrying the slot bitmask, with ONE interleaved toolhead `G1 E-15 F360` pull between them, `0x08 00/01` sensor prep reads in stock order, and hold-covering timeouts (START 22 s; the FINISH ACK is held ~9.6 s so it gets 13 s -- the old 0.5 s timeouts ALWAYS timed the finish out on real hardware, so an unload could never confirm). Completion gates on the toolhead filament switch CLEARING within a 60 s wall budget (the `0x11` reply status is wire-disproven as a gate and is diagnostic-only). The "buffer node 0x81 single-byte retrude" form was removed as wire-disproven (that traffic is FOC-servo frames sharing the reference printer's bus, not a CFS retrude). Sensorless rigs fall back to box-state corroboration.
+- **`creality_cfs.py` GET_BOX_STATE (0x0A) decode corrected.** The request is sent EMPTY (the old param byte is not on the wire) and the reply's `data[0]`/`data[1]` are an OPAQUE per-firmware base (`0x1a20`/`0x1b26`/`0x1c24`/`0x1d21` all observed on identical hardware) that carries no state; the real load flag is `data[3] == 0x02` (feed mode = `0x00`). The frame STATUS byte is surfaced as the async event channel (`0x30` insert push with per-slot phase array, `0x16`+`d3==0x04` busy/cal). `get_box_state()` returns `None` on no response instead of raising.
+- **`creality_cfs.py` SET_PRE_LOADING (0x0D) inversion + NAK fix.** Payload generalized to `[mask][phase]`; on the wire ARM is phase `0x00` and DISARM is `0x01`, so the old `ENABLE` pass-through sent the exact opposite (CFS_ENABLE_PRELOAD emitted the wire DISARM). The reply STATUS byte is now checked (`0x00` ACK; `0x16` NAK = controller did not finish) and blocking phases get real timeouts (per-slot re-arm `[slot][02]` blocks ~38 s and gets 90 s) so the host can never hang up mid-phase and NAK-wedge the box into its `0x16/d3=04` state.
+- **`creality_cfs.py` connect timing.** After addressing, each box gets a wake-sized 12 s single-shot `0x0A` probe with bounded retries (the box slave-MCU needs ~9.5 s after the `0xA0` assign and the first `0x0A` after quiet legitimately returns `None`; the old 0.05-0.1 s init reads missed the box entirely), then the stock connect-init burst: feed mode, `0x14` version, the TWO-frame pre-load self-check (`[00][01]` + `[0f][01]` with `0x08` reads between -- stock sends NO `[0f][02]`), and the all-slot `0x02`/`0x03` presence read.
+
+### Added (v1.4.0)
+
+- **`CFS_CUT`**: the mechanical cut ram (there is no bus "cut" command; `0x05` only reads the latched result). Safety rails ported from the validated implementation: hard guard on `cut_switch_pin`, zero-travel refusal when the cut position equals the pre-cut position, `cut_pos_x_max` travel bound, blocking M109 preheat, and the `0x05` post-check with the `0x02` nothing-to-cut decode (empty slot, not a failure).
+- **`CFS_FLUSH`**: the change flush as a hotend `G1 E` purge loop. Total = `LEN=`, or `nozzle_volume/2.4 + (5/12)*VOLUME*flush_multiplier`, else `flush_default_len`; split at the per-cycle cap (cycle 1 = cap, remainder split equally -- the wire-verified breakdowns 158.75->[80,78.75], 343.33->[80,65.83x4], 101.25->[80,21.25]); per-cycle measuring-wheel under-feed/clog watchdog (<30 percent advance aborts recoverably, skipped when a wheel read is None so wheel-less printers can't false-abort); optional per-cycle `nozzle_clean_macro`; final 1.5 mm retract. Hard bounds on total (600), cycles (10) and per-cycle cap (160).
+- **Temperature guards (critical for mainline Klipper)**: mainline KEEPS the `min_extrude_temp` raise the Creality fork deletes, so every hotend `G1 E` move this module issues is preceded by a blocking `M109`; and because the BOX-MOTOR feed bypasses Klipper's cold-extrude protection entirely (it is not an extruder move), the module enforces its own `MIN_EXTRUDE_TEMP` (170 C) floor + `M109` before any feed toward the hotend. `TEMP=` overrides per command; `extrude_temp` (default 220) configures the default.
+- **Slot presence reads**: `0x02` READ_MATERIAL (slot-bitmask ASCII map; `none`=empty, `unknown`=inserted-no-tag) and `0x03` READ_REMAIN (positional 4-byte reply with `0xFF` not-in-mask sentinels -- do NOT read the sentinels as filament), plus `0x0C` GET_BUFFER_STATE on the buffer node. `measuring_wheel_mm()` returns the resolved BE-float wheel value (the "unresolved decode" TODO is closed).
+- **`get_status()`**: `printer["creality_cfs"]` now resolves in macros (box_count, online map, active_tool, slot cache). The shipped `CFS_PRINT_END` uses `active_tool` instead of blind-retracting four bus addresses.
+- New `[creality_cfs]` options (all optional, printer-agnostic): `filament_sensor`, `extrude_temp`, `load_max_bursts`, `load_wall_budget`, `cut_switch_pin`, `pre_cut_pos_x/y`, `cut_pos_x/y`, `cut_velocity`, `cut_pos_x_max`, `nozzle_volume`, `flush_multiplier`, `flush_cycle_cap`, `flush_default_len`, `flush_velocity`, `nozzle_clean_macro`.
+
+### Fixed (v1.4.0 tool-change topology)
+
+- **`configs/cfs_macros.cfg`**: T0..T3 now select the SLOT BITMASK (`TOOL=0..3`) on the single controller at bus address 0x01. The old macros mapped T0..T3 to `BOX=1..4` BUS ADDRESSES, so on real hardware T0 loaded slot B's bitmask-equivalent and T1/T2/T3 addressed absent controllers and no-op'd. Multi-box daisy-chains are documented as a separate axis (`BOX=` selects the controller; a chained second unit is T4..T7 on `BOX=2`). `CFS_PRINT_START`/`CFS_PRINT_END` arm/disarm pre-loading with the corrected wire phases; `CFS_PRINT_END` unloads only the tracked active tool. The `_CFS_TOOL_CHANGE` sequence follows the validated order (optional cut -> unload old -> load new -> optional flush) with opt-in `use_cut`/`use_flush` variables.
+- **`configs/printer.cfg.example`**: `box_count` documented as CONTROLLERS (1 for a normal single CFS), not tool slots; K1/K1C/K2 compatibility claims downgraded to untested (the K1-family firmware is a CAN build with remapped function codes); the new choreography options documented.
+
+### Security / hygiene (2026-07-05)
+
+- **`captures/cfs_toolchange_capture_20260520_013844.bin`**: scrubbed the per-unit CFS box serial embedded in the two `0x14` GET_VERSION_SN reply frames (the serial tail replaced with a same-length placeholder; both frame CRC-8s recomputed so the capture still parses). The generic firmware-version prefix is kept.
+- Removed the untracked root `BRAND.md` leftover (its tracked home is `docs/STYLE.md`).
+
+### Fixed (v1.4.0 review pass)
+
+- **`CFS_CUT`/`CFS_FLUSH` connection guards**: both new handlers now check `is_connected` up front (in `CFS_CUT`, BEFORE any heat or motion). Without the guard, a disconnected CFS raised a bare RuntimeError out of the first bus read, which mainline routes to `invoke_shutdown` -- and `CFS_CUT` would have completed the mechanical ram first. Found by the Klipper-review pass.
+- **`CFS_SET_PRELOAD` single-shot**: the raw preload gcode now sends its `0x0D` frame once (`retries=1`) like every other choreography frame; the default 3 retries on the 90 s blocking per-slot re-arm could hold the gcode mutex for 270 s against a silent box.
+- **Tool tracking unified**: `_CFS_TOOL_CHANGE` reads the previous tool from the module's `get_status()` `active_tool` (which also tracks standalone `CFS_EXTRUDE`/`CFS_RETRUDE` calls) instead of only its own macro variable.
+
+### Tests (v1.4.0)
+
+- The suite is re-pointed at the corrected protocol: the pre-v1.4.0 tests locked in the wire-disproven ramp/retrude/preload/state models and would have guarded the bugs. `tests/mock_cfs.py` now answers the full v1.4.0 command set (4-byte box state word with the `data[3]` flag, BE-float wheel words that advance per push, START/FINISH retrude ACKs, presence reads with `0xFF` sentinels); `tests/conftest.py` gives the fake reactor a real advancing clock and stops `lookup_object` from faking optional printer objects.
 
 ### Fixed (docs: buffer topology + termination, 2026-06-22)
 
