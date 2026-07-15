@@ -18,6 +18,10 @@ CAN build with remapped function codes). See the 1.4.0 entry below and
 
 ## [Unreleased]
 
+### Tests
+
+- Covered the v1.4.0 choreography and cut/flush handlers that the suite was not exercising: load/extrude, retrude/unload, `CFS_CUT`/`CFS_FLUSH`, and the connect/init/slot-read paths (`tests/test_load_choreography.py`, `tests/test_unload_choreography.py`, `tests/test_cut_flush_handlers.py`, `tests/test_connect_init_slotreads.py`). This raises `creality_cfs.py` coverage from 69% to 91%, back above the 80% CI gate (420 passed). No behavior change: `creality_cfs.py` and all existing tests are untouched.
+
 ### Changed (v1.4.0 choreography rebuild from the hardware-validated reference stack, 2026-07-05)
 
 - **`creality_cfs.py` LOAD (0x10) rebuilt sensor-gated.** The fixed 5-stage ramp with the position-settle exit is replaced by the validated model: the `0x05` push REPEATS and the `0x06`/`0x07 03` finalize fires only after the toolhead `[filament_switch_sensor]` trips, with the whole cycle RE-ARMED (fresh `[slot] 00 00`) until the switch latches, a per-push wheel-advance watchdog for the box's ~3-push per-arm self-limit (`LOAD_PUSH_MIN_ADVANCE`/`LOAD_PUSH_STALL_LIMIT`), 15 s blocking per-stage reply timeouts (the box HOLDS each reply until the mechanical step completes; this is the real ready mechanism, not a host poll) and a 90 s wall budget. The `0x10` push reply decode is CORRECTED: the payload is a 4-byte big-endian IEEE-754 wheel float (negative, magnitude-monotonic); the old `[motor state 0xC3/0xC4][uint16 0.01mm]` model was a misparse (the "state" byte was the float's exponent byte). `CFS_EXTRUDE` now runs the full choreography (melt guard, `0x04 [00][slot]` feed-mode entry, `0x0F` engage, one-shot `0x08` ping, gated ramp cycles, `0x05` cut check, `0x04 [slot][00]` print mode, `0x0F` release) and takes a REQUIRED `TOOL=<0-3>`.
