@@ -18,6 +18,21 @@ CAN build with remapped function codes). See the 1.4.0 entry below and
 
 ## [Unreleased]
 
+---
+
+## [1.5.0] - 2026-07-28
+
+### BREAKING
+
+- **`enter_feed_mode()` lost its slot parameter and is now `enter_feed_mode(addr)`.** The old
+  `enter_feed_mode(addr, slot)` form built the payload `0x04 [00][slot]`, which was an invented
+  generalization that only coincided with the stock wire for slot A. Stock sends the fixed pair
+  `0x04 [00][01]` for every slot. Every caller inside this repo already passes one argument, and
+  no g-code command signature changed, so nothing in a normal `[creality_cfs]` install breaks.
+  This will break external code that calls `enter_feed_mode()` directly with two arguments.
+  Fix: drop the second argument. The slot is selected by the `0x10`/`0x11` frames and the
+  print-mode `[slot][00]` latch, never by the enter-feed frame.
+
 ### Fixed (stock-fidelity audit, 2026-07-19)
 
 - **Broadcast response matching.** A slave answers a broadcast (0xFC-0xFF) from its OWN unicast address: the stock boot capture shows the 0xFE `SET_SLAVE_ADDR` broadcast ACKed as `f7 01 11 00 a0 ...` (reply frame address 0x01, not 0xFE). The transport's strict addr-echo match therefore dropped every discovery/assign reply on real hardware, and auto-addressing could never see a box. Broadcast waiters now match on the function code alone; unicast keeps the strict `(addr, func)` echo match. Regression tests drive both paths through the real read path.
@@ -44,6 +59,10 @@ CAN build with remapped function codes). See the 1.4.0 entry below and
 ### Tests (2026-07-19)
 
 - Suite grows 420 -> 468 passed: `tests/test_box_status_features.py` (new file) covers the box-status surface, the refill gcodes and the error dictionary, and every audit fix above lands with regression tests (broadcast matching through the real read path, the enter-feed fixed pair, the timeout budgets, the 0x05 buffer read, the 0x0A fault dispatch, the flush arming gate, the `BOX=` bounds). CI-equivalent run (`--cov=creality_cfs --cov-fail-under=80 -m "not slow"`): 467 passed, 1 deselected, coverage 91.7% over the 80% gate.
+
+---
+
+## [1.4.0] - 2026-07-05
 
 ### Tests
 
@@ -291,7 +310,10 @@ USB-RS485 adapter, completely independent of Creality hardware and firmware.
 
 ---
 
-## [Unreleased]
+## Historical: roadmap as written at 0.2.0-alpha
+
+Kept as a historical record. Most of these landed in v1.1.x through v1.4.0; this is not a
+current roadmap. See README.md for the live roadmap.
 
 ### Planned for v1.2.0
 - T0/T1/T2/T3 tool change macro set replacing box_wrapper.so

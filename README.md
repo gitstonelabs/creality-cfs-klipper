@@ -15,7 +15,7 @@ Maintained by [@gitstonelabs](https://github.com/gitstonelabs)
 
 ## Status
 
-> **v1.4.0 Beta**
+> **v1.5.0 Beta**
 >
 > - ✅ Protocol fully reverse-engineered from live RS485 traffic captures (CRC-verified frames)
 > - ✅ Transport, CRC, and auto-addressing capture-validated on this module
@@ -203,7 +203,14 @@ escalation is a formal complaint with the
 
 ## Roadmap
 
-### ✅ v1.4.0 Beta (current)
+### ✅ v1.5.0 Beta (current)
+- Stock-fidelity audit against the wire captures: broadcast replies matched on function code (a slave answers a broadcast from its own unicast address, so the old strict addr-echo dropped every discovery reply and auto-addressing could never see a box), operational timeouts raised 0.1 s to the stock 2.0 s budget, `BOX=` bounded by `box_count`
+- Filament buffer re-pinned to func 0x05 on the box (the old 0x0C-on-0x81 read was servo-entangled and the old CUT_STATE decode was a misattribution of the same buffer enum)
+- 0x0A pushed-status fault listener: buffer-empty and enwind faults now surface instead of passing silently mid-print
+- Stock-shaped flat `printer.box` status object plus the key831..key864 error dictionary, so the stock touchscreen panel contract and the StoneLabs UIs can read it directly
+- **Breaking:** `enter_feed_mode()` is now `enter_feed_mode(addr)`. Stock sends the fixed pair `0x04 [00][01]` for every slot; the old `[00][slot]` form was never on the wire. No g-code signature changed
+
+### ✅ v1.4.0
 - Choreography layer ported from the hardware-validated reference implementation: sensor-gated load, START/FINISH unload with the toolhead-switch completion gate, mechanical cut ram, hotend flush loop with clog watchdog, wire-correct preload semantics (arm = phase 0x00), connect timing (~9.5 s box wake)
 - 0x10 push-reply decode corrected: a 4-byte big-endian IEEE-754 measuring-wheel float (the old motor-state + uint16 position model was a misparse)
 - 0x0E measuring-wheel decode resolved (same BE float, negative, magnitude-monotonic)

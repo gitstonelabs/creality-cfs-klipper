@@ -162,7 +162,13 @@ Changelog:
                          * T0..T3 macros fixed: tools select the SLOT BITMASK on the single
                            controller at addr 0x01 (TOOL=0..3), NOT bus addresses 1..4.
                            Multi-box daisy-chains are a separate axis from tool slots.
-  v1.4.1 (2026-07-19): STOCK-FIDELITY AUDIT against the wire captures + decode corpus.
+  v1.5.0 (2026-07-28): STOCK-FIDELITY AUDIT against the wire captures + decode corpus.
+                         (Audit work dated 2026-07-19; released 2026-07-28.)
+                         *** BREAKING: enter_feed_mode() lost its slot parameter and is now
+                         enter_feed_mode(addr). See the bullet below. Every in-repo caller
+                         already passes one argument and no gcode signature changed, so a
+                         normal [creality_cfs] install is unaffected; external code calling
+                         it with two arguments must drop the second. ***
                          * BROADCAST RESPONSE MATCHING fixed: a slave answers a broadcast
                            (0xFC-0xFF) from its OWN unicast address (stock capture: the
                            0xFE SET_SLAVE_ADDR is ACKed by `f7 01 11 00 a0 ...`), so

@@ -1,6 +1,6 @@
 # Creality Filament System (CFS) Klipper Integration Installation Guide
 
-**Module version:** 1.4.0 (beta)
+**Module version:** 1.5.0 (beta)
 **Protocol confidence:** all commands confirmed against live RS485 capture; the v1.4.0 choreography is a wire-faithful port of a reference implementation hardware-validated on a Creality Hi + CFS v1 (not yet exercised on hardware from this module itself)
 **Klipper compatibility:** v0.11.0+
 

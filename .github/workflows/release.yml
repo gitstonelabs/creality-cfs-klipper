@@ -55,7 +55,10 @@ jobs:
           with open("CHANGELOG.md") as f:
               text = f.read()
           # Extract the first versioned section
-          match = re.search(r'## \[v[\d.]+.*?\n(.*?)(?=\n## |\Z)', text, re.DOTALL)
+          # Headings are "## [1.5.0] - 2026-07-28" (no leading "v"), so the "v" is
+          # optional. Requiring it made this never match and every release body
+          # silently fell back to the placeholder below.
+          match = re.search(r'## \[v?[\d.]+.*?\n(.*?)(?=\n## |\Z)', text, re.DOTALL)
           notes = match.group(1).strip() if match else "See CHANGELOG.md for details."
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"NOTES<<EOF\n{notes}\nEOF\n")
