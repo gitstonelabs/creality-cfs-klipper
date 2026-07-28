@@ -241,10 +241,12 @@ extrude_temp: 220
 #cut_velocity: 3000
 
 # Flush (CFS_FLUSH) tuning
-#nozzle_volume: 183       # melt-zone volume (mm^3); flush base = nozzle_volume / 2.4
+#nozzle_volume: 108       # melt-zone volume (mm^3); flush base = nozzle_volume / 2.4 (stock default 108)
 #flush_multiplier: 1.0    # scales the slicer VOLUME= contribution
 #flush_cycle_cap: 80      # per-cycle purge cap (mm)
 #flush_default_len: 140   # total purge fallback when no LEN=/VOLUME= given
+#buffer_empty_len: 30     # buffer capacity (mm, stock default 30); the flush clog
+                          # watchdog arms only for cycles >= 2x this length
 #flush_velocity: 360
 #nozzle_clean_macro: WIPE_NOZZLE   # optional [gcode_macro] run once per flush cycle
 ```

@@ -655,3 +655,37 @@ class TestCmdCFSAddrTable:
 
         assert "01" in text
         assert "5C" in text
+
+
+# ===========================================================================
+# CFS_STATUS / CFS_VERSION BOX= bounds (audit regression 2026-07-19)
+# ===========================================================================
+
+class TestBoxParamBounds:
+    """BOX= must be bounded by box_count: the address table only holds box_count
+    entries, so an unbounded BOX raised IndexError (a Klipper internal error) instead
+    of a clean parameter error."""
+
+    def _wired_2box(self):
+        hw = MockCFSHardware(box_count=2)
+        cfs, ser = make_wired_controller(hw, box_count=2, retry_count=1)
+        cfs._run_auto_addressing()
+        return cfs
+
+    def test_cfs_status_passes_box_count_as_maxval(self):
+        cfs = self._wired_2box()
+        gcmd = mock.MagicMock()
+        gcmd.get_int.side_effect = lambda k, d=None, **kw: {"BOX": 1}.get(k, d)
+        gcmd.error.side_effect = lambda m: Exception(m)
+        cfs.cmd_CFS_STATUS(gcmd)
+        kwargs = gcmd.get_int.call_args_list[0].kwargs
+        assert kwargs.get("maxval") == 2
+
+    def test_cfs_version_passes_box_count_as_maxval(self):
+        cfs = self._wired_2box()
+        gcmd = mock.MagicMock()
+        gcmd.get_int.side_effect = lambda k, d=None, **kw: {"BOX": 1}.get(k, d)
+        gcmd.error.side_effect = lambda m: Exception(m)
+        cfs.cmd_CFS_VERSION(gcmd)
+        kwargs = gcmd.get_int.call_args_list[0].kwargs
+        assert kwargs.get("maxval") == 2

@@ -13,7 +13,7 @@ _txn transport (real framed bytes, CRC, parse), exercising:
   extrude_stage             a single 0x10 stage frame's parsed reply
   _extrude_wheel            the 4-byte BE IEEE-754 wheel-word decode
   cmd_CFS_EXTRUDE           the G-code handler (TOOL->slot bitmask, not-connected guard)
-  enter_feed_mode           0x04 [00][slot] feed-mode entry (True on ACK)
+  enter_feed_mode           0x04 [00][01] feed-mode entry, fixed pair (True on ACK)
   set_print_mode            0x04 [slot][00] print-mode latch (True on ACK)
   _melt_guard / _effective_temp   the MIN_EXTRUDE_TEMP floor + blocking M109
 
@@ -280,11 +280,46 @@ class TestCmdCFSExtrude:
 class TestFeedAndPrintMode:
 
     def test_enter_feed_mode_returns_true_on_ack(self):
-        """enter_feed_mode routes through set_box_mode (0x04 [00][slot]); the mock's
+        """enter_feed_mode routes through set_box_mode (0x04 [00][01]); the mock's
         status-0x00 ACK satisfies the strict check -> True."""
         cfs, hw = _wired()
-        assert cfs.enter_feed_mode(0x01, SLOT_T0) is True
+        assert cfs.enter_feed_mode(0x01) is True
         hw.assert_command_received(CMD_SET_BOX_MODE)
+
+    def test_enter_feed_mode_emits_fixed_00_01_pair(self):
+        """AUDIT REGRESSION (2026-07-19): the enter-feed 0x04 payload is the stock FIXED
+        pair [00][01] -- the stock wire shows `0x04 [00][01]` before slot-2/3/4 operations
+        too (toolchange decode L105/L121; slot-2 retract capture `0105ff040001`). The old
+        [00][slot] form was invented and never observed on the wire."""
+        hw = MockCFSHardware(box_count=1)
+        cfs, ser = make_wired_controller(hw, box_count=1, retry_count=1)
+        cfs._run_auto_addressing()
+        ser.write.reset_mock()
+        assert cfs.enter_feed_mode(0x01) is True
+        frames = [c.args[0] for c in ser.write.call_args_list
+                  if len(c.args[0]) >= 7 and c.args[0][4] == CMD_SET_BOX_MODE]
+        assert frames, "no 0x04 SET_BOX_MODE frame written"
+        # frame = [HEAD][ADDR][LEN][STATUS][FUNC][DATA0][DATA1][CRC]
+        assert frames[-1][5:7] == b"\x00\x01"
+
+    def test_load_process_enter_feed_is_00_01_even_for_slot_t1(self):
+        """AUDIT REGRESSION: a slot-B (bitmask 0x02) load still opens with the fixed
+        [00][01] enter-feed frame; the slot is selected by the 0x10 ramp and the
+        print-mode [slot][00] latch, never by the enter-feed frame."""
+        hw = MockCFSHardware(box_count=1)
+        cfs, ser = make_wired_controller(hw, box_count=1, retry_count=1)
+        cfs._run_auto_addressing()
+        cfs._toolhead_filament_detected = _sequence_sensor([False, True])
+        ser.write.reset_mock()
+        gcmd = _load_gcmd(temp=250.0)
+        cfs.load_process(gcmd, 0x01, SLOT_T1)
+        mode_frames = [c.args[0] for c in ser.write.call_args_list
+                       if len(c.args[0]) >= 7 and c.args[0][4] == CMD_SET_BOX_MODE]
+        assert mode_frames, "no 0x04 frames written during the load"
+        # First 0x04 of the load = enter-feed = the fixed [00][01] pair.
+        assert mode_frames[0][5:7] == b"\x00\x01"
+        # Last 0x04 = the per-slot print-mode latch [slot][00] -- the slot lives HERE.
+        assert mode_frames[-1][5:7] == bytes([SLOT_T1, 0x00])
 
     def test_set_print_mode_returns_true_on_ack(self):
         """set_print_mode routes through set_box_mode (0x04 [slot][00]) -> True on ACK."""

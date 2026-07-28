@@ -26,9 +26,10 @@ coverage.xml
 htmlcov/
 .tox/
 
-# IDE / editor
+# IDE / editor / local tool state
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
@@ -36,9 +37,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
-
-# Claude Code
-.claude/
 
 # External repos (not part of this project)
 Hi_Klipper/

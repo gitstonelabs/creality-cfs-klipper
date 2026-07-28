@@ -162,6 +162,61 @@ Changelog:
                          * T0..T3 macros fixed: tools select the SLOT BITMASK on the single
                            controller at addr 0x01 (TOOL=0..3), NOT bus addresses 1..4.
                            Multi-box daisy-chains are a separate axis from tool slots.
+  v1.4.1 (2026-07-19): STOCK-FIDELITY AUDIT against the wire captures + decode corpus.
+                         * BROADCAST RESPONSE MATCHING fixed: a slave answers a broadcast
+                           (0xFC-0xFF) from its OWN unicast address (stock capture: the
+                           0xFE SET_SLAVE_ADDR is ACKed by `f7 01 11 00 a0 ...`), so
+                           broadcast waiters now match on the function code alone. The old
+                           strict addr-echo match dropped every discovery/assign reply on
+                           real hardware and auto-addressing could never see a box.
+                         * enter_feed_mode() sends the stock FIXED pair 0x04 [00][01] for
+                           every slot; the [00][slot] form was an invented generalization
+                           never on the wire (stock sends [00][01] before slot-2/3 retracts
+                           too). Signature changed: enter_feed_mode(addr).
+                         * Operational timeouts raised 0.1 s -> 2.0 s (TIMEOUT_OPERATIONAL)
+                           to the stock to=2 budget for the 0x04/0x14/0x0D/0x08/0x02/0x03
+                           family and 0x0A. Observed latencies (0x0A 60-125 ms steady; the
+                           0x14 reply ~1.05 s late at boot) sat ABOVE the old 0.1 s, so
+                           replies were clipped and retries re-sent into the half-duplex
+                           bus mid-answer. Addressing-layer timeouts unchanged (stock).
+                         * 0x0C GET_BUFFER_STATE request framed with STATUS 0x00, matching
+                           every captured 0x0C TX (`f7 81 04 00 0c 0b`); the 0xFF form was
+                           never observed on the wire.
+                         * CFS_STATUS/CFS_VERSION BOX= is bounded by box_count (was a raw
+                           IndexError into a Klipper internal error for BOX > box_count).
+                         * FILAMENT-BUFFER RE-PIN (per the 2026-07-19 buffer spec): the
+                           real buffer read is func 0x05 on the BOX (TX f7 01 03 ff 05;
+                           RX byte 0 middle / 1 full / 2 empty -- enum bytecode-derived,
+                           only 0x00 wire-seen on the Hi). get_buffer_state() now does
+                           that read; the 0x0C-on-0x81 block read is demoted to the
+                           diagnostic read_buffer_block_0x0c() (BOX-G7/U3 entanglement).
+                           The old CUT_STATE decode of the same frame was a
+                           misattribution of the buffer enum; cut_state_code()/
+                           cut_state() are deprecated wrappers. The post-load and
+                           post-cut 0x05 reads are reworded as buffer verification
+                           (stock does not gate on them; neither do we).
+                         * 0x0A pushed-status fault listener (gap-fill): abnormal 0x0A
+                           STATUS bytes (0x50 FILAMENT_ERR runout flag, 0x51 SPEED_ERR
+                           -> key846, 0x52 ENWIND_ERR -> key847) are dispatched from
+                           BOTH the polled reply and unsolicited pushes; without it a
+                           mid-print buffer-empty passed silently. NO periodic buffer
+                           poll or host top-up loop was added: the box firmware runs
+                           the feed loop internally, stock has no host loop.
+                         * Flush clog watchdog: latches key845 ('the nozzle is
+                           blocked', the key the stock wire raises at wheel diff 0.0;
+                           was key859), and is armed only for cycles >= 2x
+                           buffer_empty_len (stock gates the wheel-diff check on the
+                           buffer's absorb capacity; new config key buffer_empty_len,
+                           stock default 30). Unload 0x11 trigger-byte semantics
+                           documented (0x00 buffer-empty-limit stop, 0x01 material-
+                           sensor stop); phase failures latch key851/key849
+                           (diagnostic only).
+                         * Box-parity status surface (in-flight, same tree): stock-shaped
+                           flat `box` status object, BOX_ENABLE_AUTO_REFILL /
+                           BOX_UPDATE_SAME_MATERIAL_LIST / BOX_CHECK_MATERIAL_REFILL /
+                           BOX_ERROR_CLEAR, the key831..key864 error dictionary, and
+                           NOZZLE_VOLUME_DEFAULT reconciled 183 -> 108 (the stock BoxCfg
+                           compiled default; 183 was the reference printer's tuned value).
 
 Known limitations:
   - Half-duplex RS485 direction switching is left to a hardware auto-direction adapter
@@ -171,9 +226,10 @@ Known limitations:
     parses incoming frames; a reactor.completion delivers the matched response to the waiting
     caller, which parks in completion.wait() bounded by a reactor timer. No call blocks the
     reactor greenlet.
-  - 0x05 CUT_STATE: 0x00 (cut OK) and 0x02 (nothing to cut / empty slot) are wire-decoded; a
-    failing-cut counter-example (filament present, blade jammed) is still uncaptured, so any
-    other value is treated as 'cut not confirmed'.
+  - 0x05 post-cut read: the byte is the BUFFER position (v1.4.1 re-pin), not a cut
+    confirmation; the cut itself is confirmed by the toolhead cutter switch. 0x00 middle
+    (filament staged, historically 'cut OK') and 0x02 empty (nothing staged) are
+    wire-decoded; any other value is reported and box.cut_state stays False.
   - The choreography constants (stage timings, self-limit thresholds, flush split) were
     hardware-validated on a Creality Hi + CFS v1 box. Other hosts/boxes are expected to match
     (the box firmware paces itself via the blocking replies) but have not been bench-verified.
@@ -219,6 +275,12 @@ logger = logging.getLogger(__name__)
 PACK_HEAD: int = 0xF7           # Fixed message header byte
 BROADCAST_ADDR_MB: int = 0xFE   # Broadcast address for material boxes (料盒)
 BROADCAST_ADDR_ALL: int = 0xFF  # Broadcast address for all devices
+# All broadcast destinations (0xFC/0xFD are the stock CLM/BTM assignment pools; 0xFE/0xFF
+# the MB/all broadcasts). A slave answers a broadcast from its OWN unicast address -- the
+# stock boot capture shows the 0xFE SET_SLAVE_ADDR broadcast ACKed as `f7 01 11 00 a0 ...`
+# (reply frame addr = 0x01, NOT 0xFE) -- so a broadcast waiter must match on the function
+# code alone, never on an address echo.
+BROADCAST_ADDRS: tuple = (0xFC, 0xFD, 0xFE, 0xFF)
 
 # STATUS byte values
 STATUS_ADDRESSING: int = 0x00   # Used for auto-addressing commands and responses
@@ -258,7 +320,17 @@ SER_RS485_RTS_AFTER_SEND: int = (1 << 2)
 # Timing constants from Hi_Klipper/klippy/extras/auto_addr_wrapper.py
 TIMEOUT_LONG: float = 1.0    # CMD_GET_SLAVE_INFO discovery broadcast (may block ~1 s)
 TIMEOUT_SHORT: float = 0.05  # CMD_SET_SLAVE_ADDR, CMD_GET_ADDR_TABLE, CMD_LOADER_TO_APP
-TIMEOUT_MEDIUM: float = 0.1  # CMD_ONLINE_CHECK and operational commands
+TIMEOUT_MEDIUM: float = 0.1  # CMD_ONLINE_CHECK (stock auto_addr heartbeat cadence)
+# Stock budgets the box OPERATIONAL family (0x04/0x14/0x0D begin+phase1/0x08/0x02/0x03) at
+# to=2 on the wire (stock connect capture, box-connect decode 2026-06-29), and the steady
+# 0x0A poll at to=3600 (effectively unbounded). Observed reply latencies: 0x0A 60-125 ms
+# steady, the 0x14 version reply ~1.05 s late at boot. The pre-audit 0.1 s default was an
+# invented carry-over from the auto_addr heartbeat and sat BELOW the observed latencies, so
+# real replies were dropped and the retry re-sent into a half-duplex bus mid-answer.
+# 2.0 s is the stock operational budget; it also serves as this port's hard deadline for
+# 0x0A (stock's to=3600 is a poll cadence under a free-running reader thread, not a hard
+# reply deadline -- an unbounded gcode-context block would be wrong here).
+TIMEOUT_OPERATIONAL: float = 2.0
 
 # Default retry count for operational commands
 DEFAULT_RETRY_COUNT: int = 3
@@ -284,7 +356,15 @@ CMD_GET_BOX_STATE: int = 0x0A   # Get box state word; WIRE-CONFIRMED 2026-06-09/
                                 # WAS 0x08 (wrong; 0x08 is GET_HARDWARE_STATUS, see below).
 CMD_GET_HARDWARE_STATUS: int = 0x08  # Toolhead filament-sensor / hardware status flags;
                                      # WIRE-CONFIRMED 2026-06-09. (Was CMD_GET_HARDWARE_STATUS_TODO.)
-CMD_CUT_STATE: int = 0x05       # Read cut-state AFTER the mechanical cut; WIRE-CONFIRMED 2026-06-09.
+CMD_GET_BUFFER_STATE: int = 0x05  # Filament-BUFFER state read on the BOX (addr 0x01), no data
+                                  # byte. RE-PINNED 2026-07-19 (buffer spec): the 2026-06-25
+                                  # stock captures show the .so itself decoding this read as
+                                  # `cmd: GET_BUFFER_STATE` / `buffer_state: 0x0` / `middle`.
+                                  # The old CUT_STATE label (06-09 hand-decode) was a
+                                  # misattribution; the real cut-state 0x05 lives on the MOTOR
+                                  # addrs 0x81/0x82 (self-check only), not the box.
+CMD_CUT_STATE: int = CMD_GET_BUFFER_STATE  # DEPRECATED alias (same wire frame; kept so
+                                           # existing callers keep working)
 CMD_MEASURING_WHEEL: int = 0x0E # Feed encoder/measuring-wheel word; WIRE-CONFIRMED 2026-06-09.
 CMD_CTRL_CONNECTION_MOTOR_ACTION: int = 0x0F  # Engage(0x01)/release(0x00) feeder motor;
                                               # WIRE-CONFIRMED 2026-06-09. Hi uses 0x0F, NOT the
@@ -305,7 +385,13 @@ CMD_GET_FILAMENT_SENSOR_STATE: int = 0x02  # slot-material ASCII map ('A:unknown
                                            # inserted-no-tag, a label=RFID-identified)
 CMD_GET_REMAIN_LEN: int = 0x03             # per-slot remain byte(s), slot-bitmask selected;
                                            # positional 4-byte reply, 0xFF = not-in-mask sentinel
-CMD_GET_BUFFER_STATE: int = 0x0C           # buffer node (0x81+) 8-byte block; all-zero = empty
+CMD_BUFFER_BLOCK_0X0C: int = 0x0C          # DIAGNOSTIC ONLY: the 8-byte block read on 0x81+.
+                                           # DEMOTED 2026-07-19 (BOX-G7/U3): the identical frame
+                                           # also goes to 0x82 (the Y FOC servo on the reference
+                                           # printer) and sits in the servo-arm preamble, so the
+                                           # "buffer node" reading is entangled with servo/param
+                                           # traffic. The REAL buffer read is func 0x05 on the
+                                           # box (CMD_GET_BUFFER_STATE above).
 # The RFID/material read shares func 0x02 on this wire; the tag-LABEL byte decode out of the
 # reply is still pending a tagged-spool capture.
 CMD_GET_RFID: int = CMD_GET_FILAMENT_SENSOR_STATE
@@ -429,10 +515,31 @@ HW_STATUS_READY: int = 0x07    # ready flags
 HW_SENSOR_MATERIAL: int = 0x00
 HW_SENSOR_CONNECTIONS: int = 0x01
 
-# 0x05 CUT_STATE RX byte (decoded 2026-06-22 from stock-vs-empty capture comparison):
-CUT_STATE_DONE: int = 0x00     # cut OK -- every real cut returns this
-CUT_STATE_SET: int = 0x01      # transient cut-state-set seen during a real cut
-CUT_STATE_NOTHING: int = 0x02  # NOTHING CUT -- slot empty / no filament at the blade (not a failure)
+# 0x05 GET_BUFFER_STATE RX byte -- the spring-shuttle filament-buffer position.
+# Enum byte-confirmed in the CAN-build bytecode (communication_get_buffer_state); the Hi .so
+# carries the same `buffer_state: 0x%x` + `middle` narration strings and the Hi wire's
+# 0x00 -> "middle" matches, so the enum is treated as Hi-valid. HONESTY NOTE: only 0x00
+# (middle) has actually been SEEN on the Hi wire; 0x01/0x02 are bytecode-derived, not
+# wire-confirmed on the Hi (open item U2 in the buffer spec).
+BUFFER_STATE_MIDDLE: int = 0x00  # shuttle between the limits (the normal post-load reading)
+BUFFER_STATE_FULL: int = 0x01    # shuttle at the FULL limit
+BUFFER_STATE_EMPTY: int = 0x02   # shuttle at the EMPTY limit / nothing staged
+BUFFER_STATE_NAMES: dict = {
+    BUFFER_STATE_MIDDLE: "middle",
+    BUFFER_STATE_FULL: "full",
+    BUFFER_STATE_EMPTY: "empty",
+}
+# DEPRECATED aliases: the 2026-06-22 "cut state" decode read the SAME byte off the SAME frame
+# but misattributed the buffer enum to cut results (a loaded path reads middle=0x00 after a
+# real cut; an empty slot reads empty=0x02 -- which is why the old model appeared to work).
+CUT_STATE_DONE: int = BUFFER_STATE_MIDDLE
+CUT_STATE_SET: int = BUFFER_STATE_FULL
+CUT_STATE_NOTHING: int = BUFFER_STATE_EMPTY
+# Buffer capacity: the length from the cut point to the extruder gears (stock BoxCfg
+# buffer_empty_len, default 30, bounds 0-60). Stock arms the flush wheel watchdog only for
+# purges >= 2x this length: a shorter hotend-side move can be absorbed entirely by the buffer
+# spring and legitimately never turns the (upstream) wheel.
+BUFFER_EMPTY_LEN_MM: float = 30.0
 
 # 0x0F CTRL_CONNECTION_MOTOR_ACTION TX byte (WIRE-CONFIRMED 2026-06-09).
 MOTOR_ACTION_RELEASE: int = 0x00
@@ -451,8 +558,13 @@ MOTOR_ACTION_ENGAGE: int = 0x01
 # status-poll model is wire-disproven; those bytes never appear on the wire). ONE toolhead
 # G1 E-15 F360 pull is interleaved between the two frames (the reference .so derives -15/360
 # internally regardless of config).
-RETRUDE_PHASE_START: int = 0x00
-RETRUDE_PHASE_FINISH: int = 0x01
+# TRIGGER-BYTE SEMANTICS (buffer spec 2026-07-19, CAN-build bytecode): the 0x11 second byte
+# is the STOP-TRIGGER SELECTOR, not an abstract phase counter -- 0x00 = stop on the BUFFER
+# EMPTY limit (the fast first pull), 0x01 = stop on the slot MATERIAL sensor (the long
+# reel-in). The wire ORDER is unchanged (START then FINISH); do not "optimize" it. A phase-0
+# failure maps to key851 (buffer empty limit never tripped), a phase-1 0x14 to key849.
+RETRUDE_PHASE_START: int = 0x00     # stop trigger: buffer EMPTY limit
+RETRUDE_PHASE_FINISH: int = 0x01    # stop trigger: slot MATERIAL sensor
 RETRUDE_PHASE_RUNNING: int = RETRUDE_PHASE_FINISH   # back-compat alias (pre-v1.4.0 name)
 RETRUDE_START_TIMEOUT_S: float = 22.0   # start frame reply (a real pull replies in ~12-14 s)
 RETRUDE_FINISH_TIMEOUT_S: float = 13.0  # finish ACK held ~9.6 s; 13 s gives headroom
@@ -500,9 +612,13 @@ DEFAULT_EXTRUDE_TEMP: float = 220.0
 # total purge = nozzle_volume/2.4 + (5/12) * flush_volume * flush_multiplier, split into
 # per-cycle purges capped at the per-cycle cap: cycle 1 = cap, remainder split equally.
 # Wire-verified breakdowns: 158.75 -> [80, 78.75]; 343.33 -> [80, 65.83 x4]; 101.25 -> [80, 21.25].
-FLUSH_TOTAL_BASE: float = 76.25       # nozzle_volume/2.4 at the 183 mm^3 default
+FLUSH_TOTAL_BASE: float = 45.0        # nozzle_volume/2.4 at the stock 108 mm^3 default
 FLUSH_VOL_COEFF: float = 5.0 / 12.0   # exactly 1/2.4 (binary-confirmed volume->length divisor)
-NOZZLE_VOLUME_DEFAULT: float = 183.0
+# Reconciled to the stock BoxCfg compiled default (box_wrapper §4: nozzle_volume=108). The
+# earlier 183 was the reference printer's tuned purge, not the out-of-box default -- matching
+# 108 makes this port's default flush volume agree with stock. Still user-configurable via
+# the nozzle_volume config key for a printer that wants the tuned value back.
+NOZZLE_VOLUME_DEFAULT: float = 108.0
 FLUSH_MULTIPLIER_DEFAULT: float = 1.0
 FLUSH_CYCLE_CAP_DEFAULT: float = 80.0
 FLUSH_TOTAL_DEFAULT: float = 140.0    # no-LEN=/no-volume fallback (stock falls back to its
@@ -532,27 +648,75 @@ BOX_PROBE_RETRY_DELAY_S: float = 1.0
 # Per-command timeouts
 # ---------------------------------------------------------------------------
 CMD_TIMEOUTS: dict = {
+    # Addressing layer: stock auto_addr values (1.0 discovery / 0.05 assign+table / 0.1 a2).
     CMD_GET_SLAVE_INFO: TIMEOUT_LONG,
     CMD_SET_SLAVE_ADDR: TIMEOUT_SHORT,
     CMD_GET_ADDR_TABLE: TIMEOUT_SHORT,
     CMD_ONLINE_CHECK:   TIMEOUT_MEDIUM,
     CMD_LOADER_TO_APP:  TIMEOUT_SHORT,
-    CMD_SET_BOX_MODE:   TIMEOUT_MEDIUM,
-    CMD_GET_BOX_STATE:  TIMEOUT_MEDIUM,
-    CMD_GET_HARDWARE_STATUS: TIMEOUT_MEDIUM,
-    CMD_CUT_STATE:      TIMEOUT_MEDIUM,
-    CMD_MEASURING_WHEEL: TIMEOUT_MEDIUM,
-    CMD_CTRL_CONNECTION_MOTOR_ACTION: TIMEOUT_MEDIUM,
-    CMD_SET_PRE_LOADING: TIMEOUT_MEDIUM,
-    CMD_GET_VERSION_SN: TIMEOUT_MEDIUM,
-    CMD_GET_FILAMENT_SENSOR_STATE: TIMEOUT_MEDIUM,
-    CMD_GET_REMAIN_LEN: TIMEOUT_MEDIUM,
-    CMD_GET_BUFFER_STATE: TIMEOUT_MEDIUM,
+    # Box operational family: stock budgets to=2 (see TIMEOUT_OPERATIONAL). The pre-audit
+    # 0.1 s values were invented and clipped real replies (0x0A runs 60-125 ms steady; the
+    # 0x14 version reply lands ~1.05 s late at boot and was ALWAYS missed at 0.1 s x3).
+    CMD_SET_BOX_MODE:   TIMEOUT_OPERATIONAL,
+    CMD_GET_BOX_STATE:  TIMEOUT_OPERATIONAL,
+    CMD_GET_HARDWARE_STATUS: TIMEOUT_OPERATIONAL,
+    # 0x05 GET_BUFFER_STATE: stock's SHORT command-timeout class is 2 s -- same value.
+    CMD_GET_BUFFER_STATE: TIMEOUT_OPERATIONAL,
+    CMD_MEASURING_WHEEL: TIMEOUT_OPERATIONAL,
+    CMD_CTRL_CONNECTION_MOTOR_ACTION: TIMEOUT_OPERATIONAL,
+    CMD_SET_PRE_LOADING: TIMEOUT_OPERATIONAL,
+    CMD_GET_VERSION_SN: TIMEOUT_OPERATIONAL,
+    CMD_GET_FILAMENT_SENSOR_STATE: TIMEOUT_OPERATIONAL,
+    CMD_GET_REMAIN_LEN: TIMEOUT_OPERATIONAL,
+    CMD_BUFFER_BLOCK_0X0C: TIMEOUT_OPERATIONAL,
     # The box HOLDS 0x10/0x11 replies until the mechanical step completes -- these are the
     # v1.4.0 blocking-reply timeouts (the old 0.5 s EXTRUDE_TIMEOUT could never see them).
     CMD_EXTRUDE_PROCESS: EXTRUDE_STAGE_TIMEOUT_S,
     CMD_RETRUDE_PROCESS: RETRUDE_START_TIMEOUT_S,
-    CMD_VERSION_INFO: TIMEOUT_MEDIUM,
+    CMD_VERSION_INFO: TIMEOUT_OPERATIONAL,
+}
+
+# ---------------------------------------------------------------------------
+# Box error dictionary key831..key864 (host / UI / cloud JSON contract).
+# ---------------------------------------------------------------------------
+# Stock box_wrapper emits these keyed error strings; the Creality touchscreen CFS panel,
+# Moonraker consumers, and the StoneLabs UIs recognise a box fault by the SAME 'key<NNN>'
+# the stock firmware uses. Reproduced from the strings-extracted table in docs/protocol.md
+# (kept in sync) plus four buffer-related keys added 2026-07-19 from the filament-buffer
+# spec: key845 (wire-confirmed clog-watchdog text), key847/key851/key860 (Hi .so string
+# table). key864 is the build-B addition (byte-confirmed in tina.114041.20241127; build A
+# ended at key863) -- a downstream extrude/buffer fault: the box fed filament but the
+# buffer full-limit never tripped.
+CFS_ERROR_KEYS: dict = {
+    831: "serial_485 communication timeout",
+    834: "params error, send data",
+    835: "extrude error: blocked at connections",
+    836: "extrude error: blockage between connections and filament sensor",
+    837: "extrude error: blockage between filament sensor and extrusion gear",
+    838: "extrude error: through connections but not extruding",
+    839: "filament error: no filament detected at box extrude position",
+    840: "box switch state error",
+    841: "cut error: cut sensor not detected, not rebounded",
+    843: "RFID error: get rfid failed",
+    845: "the nozzle is blocked",           # wire-confirmed: raised by the flush wheel watchdog
+    846: "empty printing: box speed < extruder speed",
+    847: "empty printing: material enwind",  # box_so.strings; pushed via the 0x0A status byte
+    848: "material error: may be broken at connections",
+    849: "retrude error: failed to exit connections",
+    850: "retrude error: multiple connections triggered",
+    851: "retrude error: buffer empty limit not triggered",  # box_so.strings (buffer spec)
+    852: "check extruder filament sensor and box sensor state",
+    853: "humidity sensor error",
+    854: "filament present when cutting detected",
+    855: "cut position error",
+    856: "no cutter",
+    857: "motor load error",
+    858: "errprom (EEPROM) error",
+    859: "measuring wheel error",
+    860: "buffer error",                    # buffer hardware self-test failure at connect/init
+    861: "left RFID card error",
+    862: "right RFID card error",
+    864: "extrude error: buffer full limit not triggered",  # NEW in build B
 }
 
 # ---------------------------------------------------------------------------
@@ -828,6 +992,12 @@ class CrealityCFS:
             "flush_default_len", FLUSH_TOTAL_DEFAULT, above=0.)
         self.flush_velocity: float = config.getfloat(
             "flush_velocity", FLUSH_VELOCITY_DEFAULT, above=0.)
+        # buffer_empty_len: the filament buffer's capacity in mm (stock BoxCfg default 30,
+        # bounds 0-60). Purges shorter than 2x this can be absorbed by the buffer spring
+        # without turning the (upstream) measuring wheel, so the flush clog watchdog is
+        # armed only for cycles at or above that length (stock behavior).
+        self.buffer_empty_len: float = config.getfloat(
+            "buffer_empty_len", BUFFER_EMPTY_LEN_MM, minval=0., maxval=60.)
         # nozzle_clean_macro: an optional [gcode_macro] name run once per flush cycle (the
         # per-cycle nozzle wipe). Printer-specific wipe geometry belongs in that macro.
         self.nozzle_clean_macro = config.get("nozzle_clean_macro", None)
@@ -861,6 +1031,15 @@ class CrealityCFS:
         self._preload_done: dict = {}   # addr -> True once the connect pre-load completed
         self._preload_inflight: dict = {}  # addr -> True while a pre-load sequence is running
         self._slots: dict = {}          # tool idx -> {"present","material","remain"} cache
+        self._buffer_state = None       # last 0x05 buffer byte (0 middle/1 full/2 empty), or None
+
+        # --- Box feature state surfaced in the flat `box` get_status (box_wrapper §5a) ---
+        self.auto_refill: int = 0       # BOX_ENABLE_AUTO_REFILL toggle -> box.auto_refill
+        self.box_enable: int = 1        # CFS-enabled flag -> box.enable
+        self.same_material: list = []   # BOX_UPDATE_SAME_MATERIAL_LIST slot-equivalence groups
+        self._filament_useup: int = 0   # runout / filament-used-up flag -> box.filament_useup
+        self._cut_state: bool = False   # last CFS_CUT confirmed result -> box.cut_state
+        self._last_error = None         # {"code":int,"key":str,"msg":str} latched box error
 
         # --- Register Klipper lifecycle handlers ---
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
@@ -923,6 +1102,37 @@ class CrealityCFS:
             self.cmd_CFS_FLUSH,
             desc=self.cmd_CFS_FLUSH_help,
         )
+        # Stock BOX_* tokens for the box-parity features (auto-refill / same-material /
+        # error clear). Named to match the stock box_wrapper G-code surface so UIs and
+        # macros written against the Creality box can drive this port unchanged.
+        self.gcode.register_command(
+            "BOX_ENABLE_AUTO_REFILL",
+            self.cmd_set_enable_auto_refill,
+            desc=self.cmd_set_enable_auto_refill_help,
+        )
+        self.gcode.register_command(
+            "BOX_UPDATE_SAME_MATERIAL_LIST",
+            self.cmd_update_same_material_list,
+            desc=self.cmd_update_same_material_list_help,
+        )
+        self.gcode.register_command(
+            "BOX_CHECK_MATERIAL_REFILL",
+            self.cmd_check_material_refill,
+            desc=self.cmd_check_material_refill_help,
+        )
+        self.gcode.register_command(
+            "BOX_ERROR_CLEAR",
+            self.cmd_error_clear,
+            desc=self.cmd_error_clear_help,
+        )
+
+        # Register the stock-shaped flat `box` status object (box_wrapper §5a) so the
+        # Creality touchscreen CFS panel and the StoneLabs UIs -- which read printer.box.*
+        # -- resolve. It ADAPTS this module's internal state into the stock flat key set;
+        # this module keeps its own richer printer.creality_cfs.* status for its own macros.
+        # Guarded so a real stock `box` object (if ever present) is never clobbered.
+        if self.printer.lookup_object("box", None) is None:
+            self.printer.add_object("box", CFSBoxStatus(self))
 
         logger.info("creality_cfs: module loaded, port=%s baud=%d", self.serial_port, self.baud)
 
@@ -1241,7 +1451,13 @@ class CrealityCFS:
         msg: bytes = build_message(addr, status, func, data)
         # The slave echoes ADDR in frame[1] and FUNC in frame[4]; only a frame matching this
         # (addr, func) may satisfy this waiter (half-duplex multi-drop correctness).
-        match = (addr, func)
+        # BROADCAST EXCEPTION (audit fix 2026-07-19): a slave answers a broadcast from its
+        # OWN unicast address (stock wire: TX `fe 10 00 a0 01 <uniid>` is ACKed by
+        # `f7 01 11 00 a0 ...` -- frame addr 0x01, not 0xFE), so a broadcast waiter matches
+        # on the function code alone. Requiring the 0xFE/0xFF echo made every discovery and
+        # assign reply drop as "unmatched", and auto-addressing could never see a box.
+        match_addr = None if addr in BROADCAST_ADDRS else addr
+        match = (match_addr, func)
         logger.debug(
             "creality_cfs: TX addr=0x%02X func=0x%02X data=%s",
             addr, func, data.hex() if data else "(none)",
@@ -1406,6 +1622,17 @@ class CrealityCFS:
                 comp, self._pending = self._pending, None
                 self._pending_match = None
                 comp.complete(frame)
+                return
+        # Unsolicited 0x0A frames are the box's async status channel (insert pushes AND
+        # the box-raised fault statuses 0x50/0x51/0x52). Route them to the status sink
+        # before dropping, so a pushed fault reaches the host even with no waiter armed
+        # (buffer-spec gap-fill 2026-07-19). CRC-gated: garbage must not latch an error.
+        if func == CMD_GET_BOX_STATE:
+            parsed = parse_message(frame)
+            if parsed is not None and parsed["crc_valid"]:
+                self._note_box_status(parsed["addr"], parsed["status"], parsed["data"])
+                logger.debug("creality_cfs: unsolicited 0x0A status=0x%02X data=%s",
+                             parsed["status"], parsed["data"].hex())
                 return
         logger.debug("creality_cfs: unmatched/late RX dropped frame=%s", frame.hex())
 
@@ -1764,10 +1991,47 @@ class CrealityCFS:
             "addr": addr,
             "raw": data_bytes,
         }
+        # Fault dispatch (buffer spec 2026-07-19): the box raises its OWN feed-loop faults
+        # as abnormal STATUS bytes on the 0x0A reply; route them to the status sink.
+        self._note_box_status(addr, status, data_bytes)
         logger.debug("creality_cfs: GET_BOX_STATE addr=0x%02X raw=%s loaded=%s event=0x%02X",
                      addr, data_bytes.hex(), result["loaded"],
                      status if status is not None else 0xFF)
         return result
+
+    def _note_box_status(self, addr: int, status: int, data: bytes) -> None:
+        """Dispatch a 0x0A STATUS byte the box raised (polled reply OR unsolicited push).
+
+        GAP-FILL 2026-07-19 (buffer spec): the box firmware runs the buffer feed loop
+        internally and reports its OWN faults upstream as abnormal 0x0A status bytes; the
+        stock host's box-state handler dispatches them on receipt. Without this sink a
+        mid-print buffer-empty passed silently and the extruder ground air. Mapping
+        (CAN-build bytecode dispatch; the Hi .so ships the matching key strings):
+          0x50 FILAMENT_ERR -- the slot ran out -> sets the runout flag (box.filament_useup).
+          0x51 SPEED_ERR    -- "empty printing, box speed smaller than extruder": the box's
+                               feed loop cannot refill the buffer -> latches key846.
+          0x52 ENWIND_ERR   -- material enwind -> latches key847.
+        The latched key surfaces via printer.creality_cfs.last_error and the flat box
+        status. Stock pauses the print on key846/key847; this module latches and surfaces
+        only -- the pause policy is deliberately left to the operator's macros until the
+        print-supervision poller exists (see the audit open questions). Never raises (it
+        runs inside the fd read callback).
+        """
+        try:
+            if status == RESP_SPEED_ERR:
+                if not (self._last_error and self._last_error.get("code") == 846):
+                    self._record_error(846)
+            elif status == RESP_ENWIND_ERR:
+                if not (self._last_error and self._last_error.get("code") == 847):
+                    self._record_error(847)
+            elif status == RESP_FILAMENT_ERR:
+                if not self._filament_useup:
+                    logger.warning("creality_cfs: box 0x%02X raised FILAMENT_ERR (0x50): "
+                                   "slot ran out", addr)
+                self._filament_useup = 1
+        except Exception:
+            logger.exception("creality_cfs: error dispatching box status 0x%02X",
+                             status if status is not None else 0xFF)
 
     def get_version_sn(self, addr: int) -> str:
         """Query the firmware version and serial number string from a CFS box.
@@ -1914,14 +2178,21 @@ class CrealityCFS:
         # Per-channel form: channel byte = slot bitmask, second byte 0x00.
         return self.set_box_mode(addr, slot, 0x00)
 
-    def enter_feed_mode(self, addr: int, slot: int = 0x01) -> bool:
-        """Enter feed/change mode for the SELECTED slot: 0x04 payload [0x00][slot].
+    def enter_feed_mode(self, addr: int) -> bool:
+        """Enter feed/change mode: 0x04 payload [0x00][0x01] -- a FIXED byte pair.
 
-        This is the load's op-start frame -- without it the box is never placed into feed
-        mode and the 0x0F engage does not drive the rollers (a fresh load never feeds).
-        The boot/connect form uses slot 0x01; the load/unload paths pass the resolved slot.
+        This is the choreography op-start frame -- without it the box is never placed into
+        feed mode and the 0x0F engage does not drive the rollers (a fresh load never feeds).
+
+        AUDIT FIX 2026-07-19: the second byte is the literal 0x01 on the stock wire for
+        EVERY slot -- the fresh-stock toolchange decode shows `0x04 [00][01]` preceding the
+        T1C (slot 0x04) retract and the full-quit retract, and the slot-2 retract capture
+        carries `0105ff040001`. The pre-audit `[0x00][slot]` form was an invented
+        generalization never observed on the wire (it only coincided with stock for slot A,
+        whose bitmask happens to be 0x01). The SLOT is selected by the 0x10/0x11 frames and
+        the print-mode `[slot][00]` form, never by the enter-feed frame.
         """
-        return self.set_box_mode(addr, 0x00, slot)
+        return self.set_box_mode(addr, 0x00, 0x01)
 
     def set_print_mode(self, addr: int, slot: int) -> bool:
         """Enter per-slot PRINT mode: 0x04 payload [slot][0x00] (wire 01 00 / 02 00 / 04 00).
@@ -2016,10 +2287,55 @@ class CrealityCFS:
             return None
         return list(resp.get("data", b""))
 
-    def get_buffer_state(self, buffer_addr: int) -> dict:
-        """0x0C GET_BUFFER_STATE on a buffer/feeder node (0x81+). RX is an 8-byte block;
-        all-zero = buffer empty (filament parked short). Returns {"bytes","empty"} or None."""
-        resp = self._send_command(buffer_addr, STATUS_OPERATIONAL, CMD_GET_BUFFER_STATE,
+    def get_buffer_state(self, addr: int = 0x01) -> dict:
+        """0x05 GET_BUFFER_STATE on the BOX (addr 0x01): the REAL filament-buffer read.
+
+        RE-PINNED 2026-07-19 per the filament-buffer spec. Wire (stock, .so-narrated):
+          REQ: f7 [addr] 03 ff 05 [crc]        (no data byte, no slot byte)
+          RSP: f7 [addr] 04 00 05 [state] [crc]
+        The state byte is the spring-shuttle position: 0x00 middle / 0x01 full /
+        0x02 empty (enum byte-confirmed in the CAN-build bytecode; on the Hi wire only
+        0x00 "middle" has actually been captured -- see the BUFFER_STATE_* constants).
+        The value is cached (self._buffer_state, mirroring the stock per-box `buffer`
+        cache) and surfaced in get_status for UIs.
+
+        The stock HOST reads this ONLY at choreography seams (post-load verify, the
+        gear-grind drain check, pre-cut). There is NO periodic buffer poll on stock --
+        the box firmware runs the feed loop against the buffer internally -- so do NOT
+        build a host-side polling or top-up loop on this method.
+
+        Returns {"code": int, "state": str} or None on no response.
+        """
+        if not (ADDR_BOX_MIN <= addr <= ADDR_BOX_MAX):
+            raise ValueError(f"addr 0x{addr:02X} out of range [0x01, 0x04] -- the buffer "
+                             "read targets the BOX, not the 0x81+ nodes")
+        resp = self._send_command(addr, STATUS_OPERATIONAL, CMD_GET_BUFFER_STATE,
+                                  data=b"", retries=1)
+        if resp is None:
+            return None
+        d = resp.get("data", b"")
+        if len(d) < 1:
+            return None
+        code = d[0]
+        self._buffer_state = code
+        state = BUFFER_STATE_NAMES.get(code, "unknown(0x%02x)" % code)
+        logger.debug("creality_cfs: GET_BUFFER_STATE addr=0x%02X -> 0x%02X (%s)",
+                     addr, code, state)
+        return {"code": code, "state": state}
+
+    def read_buffer_block_0x0c(self, node_addr: int) -> dict:
+        """DIAGNOSTIC ONLY: the 0x0C 8-byte block read on a 0x81+ node.
+
+        DEMOTED 2026-07-19 (BOX-G7/U3): the identical frame also goes to 0x82 (the Y FOC
+        servo on the reference printer) inside the servo-arm preamble, so the old
+        "buffer node" reading is entangled with servo/param traffic; the REAL buffer read
+        is get_buffer_state() (func 0x05 on the box). Kept for bench diagnostics until a
+        directed capture re-pins the 0x0C block's role. Framed with STATUS 0x00, matching
+        every captured 0x0C TX (`f7 81 04 00 0c 0b`).
+
+        Returns {"bytes","empty"} or None on no response.
+        """
+        resp = self._send_command(node_addr, 0x00, CMD_BUFFER_BLOCK_0X0C,
                                   data=bytes([0x0B]), retries=1)
         if resp is None:
             return None
@@ -2332,49 +2648,31 @@ class CrealityCFS:
         return flag
 
     def cut_state_code(self, addr: int) -> int:
-        """CMD_CUT_STATE (0x05): read the raw cut-state byte AFTER the mechanical cut.
+        """DEPRECATED name for the 0x05 buffer-state byte read (same wire frame).
 
-        The physical cut is MECHANICAL (the toolhead rams the cutter); there is no dedicated
-        cut func -- this only READS the state the controller latches afterwards.
-
-        Protocol:
-          REQ: f7 [addr] 03 ff 05 [crc]   (no data)
-          RSP: f7 [addr] 04 00 05 [state] [crc]
-        Decoded values (2026-06-22, stock-vs-empty capture comparison):
-          0x00 = cut OK (every real cut returns this)
-          0x01 = cut-state-set, seen transiently during a real cut
-          0x02 = NOTHING CUT -- slot empty / no filament at the blade. NOT a failure; it
-                 just means there was nothing there to cut.
-        A failing-cut counter-example (filament present, blade jammed) is still uncaptured,
-        so any other byte stays 'cut not confirmed'.
+        RE-PINNED 2026-07-19: this frame is GET_BUFFER_STATE on the box, not a cut-state
+        read (the .so's own narration on the 2026-06-25 stock captures). The 2026-06-22
+        "cut state" decode observed the buffer enum and misattributed it: after a real cut
+        of a loaded path the buffer reads middle (0x00); an empty slot reads empty (0x02).
+        The bus does NOT confirm the cut -- stock confirms it via the toolhead cutter
+        switch. Kept because the raw byte is still a useful post-cut corroboration signal.
 
         Returns:
-            int: The raw state byte, or None on no response.
+            int: The raw buffer-state byte, or None on no response.
         """
-        resp = self._send_command(
-            addr,
-            STATUS_OPERATIONAL,
-            CMD_CUT_STATE,
-            data=b"",
-        )
-        if resp is None:
-            logger.warning("creality_cfs: CUT_STATE addr=0x%02X, no response", addr)
+        st = self.get_buffer_state(addr)
+        if st is None:
+            logger.warning("creality_cfs: GET_BUFFER_STATE addr=0x%02X, no response", addr)
             return None
-        data_bytes = resp.get("data", b"")
-        if len(data_bytes) < 1:
-            return None
-        logger.info("creality_cfs: CUT_STATE addr=0x%02X state=0x%02X", addr, data_bytes[0])
-        return data_bytes[0]
+        return st["code"]
 
     def cut_state(self, addr: int) -> bool:
-        """CMD_CUT_STATE (0x05) as a bool: True iff the state byte is 0x00 (cut OK).
+        """DEPRECATED bool form: True iff the 0x05 byte reads 0x00 (buffer middle).
 
-        See cut_state_code() for the raw byte and the 0x00/0x01/0x02 semantics (0x02 =
-        nothing-to-cut, which this bool form reports as False -- callers that need the
-        distinction use cut_state_code).
+        See cut_state_code(): the byte is the BUFFER state, not a cut confirmation.
         """
         code = self.cut_state_code(addr)
-        return code == CUT_STATE_DONE
+        return code == BUFFER_STATE_MIDDLE
 
     def ctrl_connection_motor_action(self, addr: int, engage: bool) -> bool:
         """CMD_CTRL_CONNECTION_MOTOR_ACTION (0x0F): engage/release the feeder motor.
@@ -2544,10 +2842,11 @@ class CrealityCFS:
     def load_process(self, gcmd, addr: int, slot: int) -> None:
         """The FULL validated load choreography (CFS_EXTRUDE):
 
-          M109 melt guard -> 0x04 [00][slot] enter feed mode -> 0x0F engage -> one-shot
+          M109 melt guard -> 0x04 [00][01] enter feed mode -> 0x0F engage -> one-shot
           0x08 liveness ping (fire-and-log; NOT a gate) -> sensor-gated 0x10 ramp cycles
           (extrude_load_ramp_gated, re-armed until the toolhead switch latches, 90 s wall
-          budget) -> 0x05 cut check -> 0x04 [slot][00] print mode -> 0x0F release.
+          budget) -> 0x05 buffer verify (expect middle; not gated) -> 0x04 [slot][00]
+          print mode -> 0x0F release.
 
         The hotend purge is NOT here -- it is the separate CFS_FLUSH, exactly as the
         validated stack sequences it (the load is strictly box-side; the box's blocking
@@ -2558,7 +2857,7 @@ class CrealityCFS:
         # TEMP GUARD FIRST: the box-motor feed rams filament toward the hotend and bypasses
         # Klipper's cold-extrude protection entirely -- enforce our own floor + M109.
         self._melt_guard(gcmd, "CFS_EXTRUDE")
-        self.enter_feed_mode(addr, slot)              # 0x04 [00][slot]
+        self.enter_feed_mode(addr)                    # 0x04 [00][01] (fixed pair)
         self.ctrl_connection_motor_action(addr, True)  # 0x0F 01 engage
         flag = self.get_hardware_status(addr, 0x00)    # one-shot ping; do NOT gate on it
         logger.info("creality_cfs: load ready-ping 0x08 -> %s (one-shot, proceeding)",
@@ -2566,6 +2865,12 @@ class CrealityCFS:
         have_sensor = self._toolhead_filament_detected() is not None
         result = self.extrude_process(addr, slot)
         if have_sensor and not result['latched']:
+            # The box fed but the toolhead switch never latched: filament went through the
+            # feed path yet the downstream fill/limit never tripped. That is the build-B
+            # extrude/buffer fault (key864). Latch it for the UI before raising. (This is
+            # the best-fit key from the key text; the exact stock failure->key mapping
+            # lives in the .so extrude FSM and is not statically recoverable.)
+            self._record_error(864)
             # Faithful to the validated implementation: the feeder is NOT released on a
             # failed load (a retry re-runs the whole choreography, which re-engages it).
             raise gcmd.error(
@@ -2573,10 +2878,14 @@ class CrealityCFS:
                 "never tripped within %.0fs over %d ramp cycle(s) on slot 0x%02X. Clear any "
                 "jam / check the slot is loaded, then retry the load."
                 % (self.load_wall_budget, result['cycles'], slot))
-        code = self.cut_state_code(addr)               # 0x05 post-load check (diagnostic)
-        if code not in (None, CUT_STATE_DONE):
-            gcmd.respond_info("CFS_EXTRUDE: cut_state 0x05 -> 0x%02X after load -- inspect."
-                              % code)
+        # 0x05 post-load BUFFER verification (stock seam: one read after the ramp, expect
+        # middle; stock does NOT gate on it, so neither do we -- log and surface only).
+        buf = self.get_buffer_state(addr)
+        if buf is None:
+            gcmd.respond_info("CFS_EXTRUDE: post-load buffer read (0x05): no response.")
+        elif buf["code"] != BUFFER_STATE_MIDDLE:
+            gcmd.respond_info("CFS_EXTRUDE: post-load buffer reads %s (stock expects "
+                              "middle) -- informational." % buf["state"])
         self.set_print_mode(addr, slot)                # 0x04 [slot][00]
         self.ctrl_connection_motor_action(addr, False)  # 0x0F 00 release
         try:
@@ -2596,7 +2905,7 @@ class CrealityCFS:
     def unload_process(self, gcmd, addr: int, slot: int) -> None:
         """The FULL validated unload choreography (CFS_RETRUDE):
 
-          M109 melt guard -> 0x04 [00][slot] enter feed mode -> 0x08 [00] (material) ->
+          M109 melt guard -> 0x04 [00][01] enter feed mode -> 0x08 [00] (material) ->
           START 0x11 [slot][00] -> ONE toolhead G1 E-15 F360 pull -> 0x08 [01]
           (connections) -> FINISH 0x11 [slot][01] (ACK held ~9.6 s; 13 s timeout) ->
           toolhead switch CLEARS = complete.
@@ -2612,22 +2921,41 @@ class CrealityCFS:
         # MELT GUARD FIRST: a cold hotend silently fails to pull filament out of the gears
         # (no-op unload), and the E-15 pull would hard-error on mainline anyway.
         self._melt_guard(gcmd, "CFS_RETRUDE")
-        self.enter_feed_mode(addr, slot)                        # 0x04 [00][slot]
+        self.enter_feed_mode(addr)                              # 0x04 [00][01] (fixed pair)
         self.get_hardware_status(addr, HW_SENSOR_MATERIAL)      # 0x08 00 (material), once
         remaining = deadline - self.reactor.monotonic()
         if remaining > 0:
+            # Phase 0: trigger byte 0x00 = "stop on the BUFFER EMPTY limit" (the trigger
+            # selector, per the buffer spec). A no-reply within the hold-covering budget is
+            # the phase-0 failure mode -> latch key851 (buffer empty limit not triggered).
+            # Diagnostic only: completion still gates on the toolhead switch.
             st = self.retrude_phase(addr, slot, RETRUDE_PHASE_START,
                                     timeout=min(RETRUDE_START_TIMEOUT_S, remaining))
-            if st not in (None, 0x00):
+            if st is None:
+                self._record_error(851)
+                gcmd.respond_info("CFS_RETRUDE: START (buffer-empty-limit pull) got no "
+                                  "reply -- key851 latched (diagnostic; completion gates "
+                                  "on the toolhead switch).")
+            elif st == 0x14:
+                self._record_error(849)
+                gcmd.respond_info("CFS_RETRUDE: START frame status 0x14 -- key849 latched "
+                                  "(failed to exit connections; diagnostic only).")
+            elif st != 0x00:
                 gcmd.respond_info("CFS_RETRUDE: START frame status 0x%02X (diagnostic only; "
                                   "completion gates on the toolhead switch)." % st)
         self._toolhead_pull()                                   # ONE G1 E-15 F360
         self.get_hardware_status(addr, HW_SENSOR_CONNECTIONS)   # 0x08 01 (connections), once
         remaining = deadline - self.reactor.monotonic()
         if remaining > 0:
+            # Phase 1: trigger byte 0x01 = "stop on the slot MATERIAL sensor" (the long
+            # reel-in; ACK held ~9.6 s). A 0x14 status maps to key849.
             st = self.retrude_phase(addr, slot, RETRUDE_PHASE_FINISH,
                                     timeout=min(RETRUDE_FINISH_TIMEOUT_S, remaining))
-            if st not in (None, 0x00):
+            if st == 0x14:
+                self._record_error(849)
+                gcmd.respond_info("CFS_RETRUDE: FINISH frame status 0x14 -- key849 latched "
+                                  "(failed to exit connections; diagnostic only).")
+            elif st not in (None, 0x00):
                 gcmd.respond_info("CFS_RETRUDE: FINISH frame status 0x%02X (diagnostic only)."
                                   % st)
         # COMPLETION GATE: the toolhead filament switch must clear (go not-detected).
@@ -2727,11 +3055,239 @@ class CrealityCFS:
             "online": online,
             "active_tool": self._active_tool if self._active_tool is not None else -1,
             "slots": {str(k): dict(v) for k, v in self._slots.items()},
+            "auto_refill": int(self.auto_refill),
+            "same_material": list(self.same_material),
+            "last_error": dict(self._last_error) if self._last_error else None,
+            # Last 0x05 buffer reading (cached at the choreography seams; the stock host
+            # never polls the buffer periodically, so this refreshes on loads/cuts only).
+            "buffer_code": self._buffer_state,
+            "buffer": (BUFFER_STATE_NAMES.get(self._buffer_state, "unknown")
+                       if self._buffer_state is not None else "unknown"),
         }
+
+    # -----------------------------------------------------------------------
+    # Stock-shaped flat `box` status (box_wrapper §5a). Consumed by CFSBoxStatus,
+    # registered as the Klipper object `box` so printer.box.* resolves for the Creality /
+    # StoneLabs UIs. The key set + types mirror the stock contract EXACTLY; values are
+    # sourced from this module's live state where it has them (T1 = the primary
+    # controller's four slots) and stock-typed defaults elsewhere.
+    # -----------------------------------------------------------------------
+
+    _SLOT_LETTERS = ("A", "B", "C", "D")
+
+    def _tn_substatus(self, tn_index: int) -> dict:
+        """Build one Tn per-box sub-dict in the stock flat shape (box_wrapper §5a).
+
+        tn_index is 0-based (T1 -> 0). T1 maps to the primary controller at addr 0x01,
+        whose four slots this module actually caches in self._slots; T2..T4 reflect only
+        the online state of any daisy-chained boxes (per-slot material for those extra
+        boxes is not modelled yet, so their slot arrays are emitted as defaults to keep
+        the shape intact).
+        """
+        entry = self._box_table[tn_index] if tn_index < len(self._box_table) else None
+        connected = bool(entry and entry.online == BoxAddressEntry.ONLINE_ONLINE)
+        remain_len = [0, 0, 0, 0]
+        material_type = ["", "", "", ""]
+        any_present = 0
+        # Only the primary controller (T1) has a real per-slot cache in this module.
+        if tn_index == 0:
+            for idx in range(4):
+                slot = self._slots.get(idx)
+                if not slot or not slot.get("present"):
+                    continue
+                any_present = 1
+                rv = slot.get("remain", -1)
+                remain_len[idx] = int(rv) if isinstance(rv, int) and rv >= 0 else 0
+                mv = slot.get("material")
+                material_type[idx] = mv if mv else ""
+        return {
+            "state": "connect" if connected else "disconnect",
+            "filament": any_present,
+            "temperature": 0,
+            "dry_and_humidity": 0,
+            "filament_detected": any_present,
+            "measuring_wheel": 0,
+            "version": "",
+            "sn": "",
+            "mode": 0,
+            "vender": ["", "", "", ""],
+            "remain_len": remain_len,
+            "color_value": [0, 0, 0, 0],
+            "material_type": material_type,
+            "uuid": "None",
+            "change_color_num": [0, 0, 0, 0],
+        }
+
+    def _flat_box_status(self) -> dict:
+        """The stock-shaped flat `box` status dict (box_wrapper §5a).
+
+        Emits the exact stock top-level keys (state/filament/map/same_material/cut_state/
+        auto_refill/enable/filament_useup/T1..T4) so printer.box.* drives the stock CFS
+        touchscreen panel and the StoneLabs UIs (which mirror this contract). The nested
+        printer.creality_cfs.* status is unchanged for this module's own macros.
+        """
+        online_any = any(e.online == BoxAddressEntry.ONLINE_ONLINE
+                         for e in self._box_table)
+        tns = {"T%d" % (i + 1): self._tn_substatus(i) for i in range(4)}
+        # 16-slot remap table T1A..T4D. No physical remap is applied (identity/passthrough):
+        # each logical slot maps to its own global index 0..15.
+        slot_map = {}
+        gi = 0
+        for n in range(1, 5):
+            for letter in self._SLOT_LETTERS:
+                slot_map["T%d%s" % (n, letter)] = gi
+                gi += 1
+        filament_present = 1 if any(t["filament"] for t in tns.values()) else 0
+        status = {
+            "state": "connect" if online_any else "disconnect",
+            "filament": filament_present,
+            "map": slot_map,
+            "same_material": list(self.same_material),
+            "cut_state": bool(self._cut_state),
+            "auto_refill": int(self.auto_refill),
+            "enable": int(self.box_enable),
+            "filament_useup": int(self._filament_useup),
+        }
+        status.update(tns)
+        return status
+
+    # -----------------------------------------------------------------------
+    # Box error dictionary emission (key831..key864)
+    # -----------------------------------------------------------------------
+
+    def _record_error(self, code: int, gcmd=None) -> str:
+        """Latch a box error by its stock key number and return the 'key<NNN>' string.
+
+        Sets self._last_error to {"code","key","msg"} with msg the verbatim stock message
+        from CFS_ERROR_KEYS (empty for an unknown code, so nothing is silently dropped).
+        Surfaced via printer.creality_cfs.last_error and cleared by BOX_ERROR_CLEAR.
+        """
+        key = "key%d" % code
+        msg = CFS_ERROR_KEYS.get(code, "")
+        self._last_error = {"code": code, "key": key, "msg": msg}
+        logger.warning("creality_cfs: box error %s: %s", key, msg)
+        if gcmd is not None:
+            gcmd.respond_info("CFS error %s: %s" % (key, msg))
+        return key
+
+    def _clear_error(self) -> None:
+        """Clear the latched box error (BOX_ERROR_CLEAR)."""
+        self._last_error = None
+
+    def find_refill_slot(self, tool: int):
+        """Return the index of a present, same-material slot that can replace `tool`, else None.
+
+        Uses the same_material groups (BOX_UPDATE_SAME_MATERIAL_LIST) to find slots
+        equivalent to `tool`, and the cached slot presence (self._slots) to pick the first
+        that currently holds filament. `tool` itself is excluded. Pure resolution -- no
+        wire traffic -- so it is safe to call from a macro or the auto-refill path.
+        """
+        for group in self.same_material:
+            if tool not in group:
+                continue
+            for cand in group:
+                if cand == tool:
+                    continue
+                slot = self._slots.get(cand)
+                if slot and slot.get("present"):
+                    return cand
+        return None
 
     # -----------------------------------------------------------------------
     # G-code command handlers
     # -----------------------------------------------------------------------
+
+    cmd_set_enable_auto_refill_help: str = (
+        "Enable or disable automatic same-material refill on runout. Parameter: ENABLE=<0|1>"
+    )
+
+    def cmd_set_enable_auto_refill(self, gcmd) -> None:
+        """G-code: BOX_ENABLE_AUTO_REFILL ENABLE=<0|1>.
+
+        Toggles the auto-refill flag surfaced as printer.box.auto_refill. When enabled, a
+        runout on the active slot is eligible to swap to a same-material slot (the
+        equivalence set comes from BOX_UPDATE_SAME_MATERIAL_LIST; resolve the candidate
+        with BOX_CHECK_MATERIAL_REFILL / find_refill_slot). Only the flag is set here --
+        the runout-triggered swap choreography is gated on hardware and is not driven from
+        this handler.
+        """
+        self.auto_refill = gcmd.get_int("ENABLE", minval=0, maxval=1)
+        gcmd.respond_info(
+            "CFS auto-refill %s" % ("enabled" if self.auto_refill else "disabled"))
+
+    cmd_update_same_material_list_help: str = (
+        "Define groups of slots holding the same material (for auto-refill). "
+        "Parameter: GROUPS=\"0,1|2,3\" (pipe-separated groups of comma-separated slot ids); "
+        "an empty GROUPS= clears the list."
+    )
+
+    def cmd_update_same_material_list(self, gcmd) -> None:
+        """G-code: BOX_UPDATE_SAME_MATERIAL_LIST GROUPS="0,1|2,3".
+
+        Records the slot-equivalence sets auto-refill uses to pick a replacement slot that
+        holds the same material. Surfaced as printer.box.same_material. Parsing only -- no
+        wire traffic.
+        """
+        raw = gcmd.get("GROUPS", "")
+        groups = []
+        for grp in raw.split("|"):
+            grp = grp.strip()
+            if not grp:
+                continue
+            slots = []
+            for tok in grp.split(","):
+                tok = tok.strip()
+                if tok == "":
+                    continue
+                try:
+                    v = int(tok)
+                except ValueError:
+                    raise gcmd.error(
+                        "BOX_UPDATE_SAME_MATERIAL_LIST: bad slot id %r" % tok)
+                if v < 0 or v > 3:
+                    raise gcmd.error(
+                        "BOX_UPDATE_SAME_MATERIAL_LIST: slot id %d out of range 0-3" % v)
+                if v not in slots:
+                    slots.append(v)
+            if slots:
+                groups.append(slots)
+        self.same_material = groups
+        gcmd.respond_info(
+            "CFS same-material groups set: %s" % (groups if groups else "(cleared)"))
+
+    cmd_check_material_refill_help: str = (
+        "Report the same-material slot that would refill a (runout) slot. "
+        "Parameters: TOOL=<0-3>"
+    )
+
+    def cmd_check_material_refill(self, gcmd) -> None:
+        """G-code: BOX_CHECK_MATERIAL_REFILL TOOL=<0-3>.
+
+        Resolves -- from the same-material groups and the cached slot presence -- which
+        alternate slot could take over for TOOL, and reports it (or that none is
+        available). This is the pure slot-equivalence resolution; issuing the actual load
+        swap is left to the caller/macro (it needs the load choreography + hardware).
+        """
+        tool = gcmd.get_int("TOOL", minval=0, maxval=3)
+        candidate = self.find_refill_slot(tool)
+        if candidate is None:
+            gcmd.respond_info(
+                "CFS refill: no same-material slot available for T%d" % tool)
+        else:
+            gcmd.respond_info("CFS refill: T%d can refill from T%d" % (tool, candidate))
+
+    cmd_error_clear_help: str = (
+        "Clear the latched CFS box error (printer.creality_cfs.last_error)."
+    )
+
+    def cmd_error_clear(self, gcmd) -> None:
+        """G-code: BOX_ERROR_CLEAR -- clear the latched box error key."""
+        had = self._last_error
+        self._clear_error()
+        if had:
+            gcmd.respond_info("CFS error %s cleared." % had.get("key"))
+        else:
+            gcmd.respond_info("CFS: no error latched.")
 
     cmd_CFS_INIT_help: str = (
         "Run the CFS auto-addressing sequence to discover and assign addresses "
@@ -2767,7 +3323,10 @@ class CrealityCFS:
         if not self.is_connected:
             raise gcmd.error("CFS serial port is not connected")
 
-        box_param = gcmd.get_int("BOX", None, minval=1, maxval=4)
+        # maxval is box_count, not 4: the address table only holds box_count entries, so a
+        # BOX beyond it would IndexError into a Klipper internal error instead of a clean
+        # parameter error (audit fix 2026-07-19).
+        box_param = gcmd.get_int("BOX", None, minval=1, maxval=self.box_count)
         addrs = [box_param] if box_param is not None else list(range(1, self.box_count + 1))
 
         results = []
@@ -2812,7 +3371,8 @@ class CrealityCFS:
         if not self.is_connected:
             raise gcmd.error("CFS serial port is not connected")
 
-        box_param = gcmd.get_int("BOX", None, minval=1, maxval=4)
+        # maxval is box_count (see cmd_CFS_STATUS; audit fix 2026-07-19).
+        box_param = gcmd.get_int("BOX", None, minval=1, maxval=self.box_count)
         addrs = [box_param] if box_param is not None else list(range(1, self.box_count + 1))
 
         results = []
@@ -3002,16 +3562,18 @@ class CrealityCFS:
         self.unload_process(gcmd, addr, slot)
 
     cmd_CFS_CUT_help: str = (
-        "Mechanical filament cut: ram the toolhead into the cutter, then confirm via the "
-        "0x05 cut-state read. Parameters: [BOX=<1-4>] [TEMP=<C>]. Requires cut_switch_pin "
-        "and the cut geometry in [creality_cfs]."
+        "Mechanical filament cut: ram the toolhead into the cutter, then read the 0x05 "
+        "buffer state as corroboration. Parameters: [BOX=<1-4>] [TEMP=<C>]. Requires "
+        "cut_switch_pin and the cut geometry in [creality_cfs]."
     )
 
     def cmd_CFS_CUT(self, gcmd) -> None:
         """G-code: CFS_CUT [BOX=<1-4>] [TEMP=<C>] -- the mechanical cut ram.
 
         The cut is MECHANICAL: the toolhead rams the blade lever against the frame-mounted
-        cutter; there is no bus 'cut' command (0x05 only READS the latched result).
+        cutter; there is no bus 'cut' command, and no bus cut-result read either (the 0x05
+        post-read is the BUFFER state, kept as corroboration; stock confirms the cut via
+        the toolhead cutter switch).
         Safety rails (all ported from the validated implementation):
           - HARD GUARD: refuses to run without cut_switch_pin configured (the cutter
             microswitch/hall). A blind ram with no switch could crash the toolhead.
@@ -3021,8 +3583,9 @@ class CrealityCFS:
           - Travel bound: cut_pos_x_max caps the ram target.
           - M109 preheat to the melt temperature before severing (cold filament shatters
             or resists the blade).
-        Post-check: 0x05 -- 0x00 cut OK; 0x02 nothing-to-cut (empty slot, not a failure);
-        anything else is surfaced as 'cut not confirmed'.
+        Post-check: the 0x05 BUFFER read -- middle (0x00) is what every observed real cut
+        produced; empty (0x02) = nothing staged at the blade (empty slot, not a failure).
+        The bus does not directly confirm the cut.
         """
         # Connection guard FIRST -- before any heat or motion. Without it, a disconnected
         # CFS would let the ram run and then hard-error out of the 0x05 post-read (review
@@ -3078,18 +3641,30 @@ class CrealityCFS:
             self.gcode.run_script_from_command("G0 Y%.3f F%.0f" % (cut_y, fr))
             self.gcode.run_script_from_command("G0 Y%.3f F%.0f" % (pre_y, fr))
         self.gcode.run_script_from_command("M400")
-        code = self.cut_state_code(addr)
+        # Post-cut 0x05 read, RE-PINNED 2026-07-19: the byte is the BUFFER state, not a cut
+        # confirmation (the bus has no cut-result read; stock confirms the cut via the
+        # toolhead cutter switch). The 2026-06-22 stock-vs-empty observations hold under
+        # the corrected decode: a real cut of a loaded path reads middle (0x00), an empty
+        # slot reads empty (0x02). Kept as a corroboration signal.
+        buf = self.get_buffer_state(addr)
+        code = buf["code"] if buf is not None else None
+        # box.cut_state keeps its historical meaning (the post-cut 0x05 read came back
+        # 0x00): under the corrected decode that is "buffer reads middle after the cut".
+        self._cut_state = (code == BUFFER_STATE_MIDDLE)
         if code is None:
-            gcmd.respond_info("CFS_CUT: cut_state 0x05 NO RESPONSE -- cut UNCONFIRMED. "
-                              "Verify the cut visually.")
-        elif code == CUT_STATE_DONE:
-            gcmd.respond_info("CFS_CUT: cut confirmed (0x05 -> 0x00).")
-        elif code == CUT_STATE_NOTHING:
-            gcmd.respond_info("CFS_CUT: cut_state 0x05 -> 0x02 (NOTHING TO CUT -- slot "
-                              "empty; not a failure).")
+            gcmd.respond_info("CFS_CUT: post-cut buffer read (0x05) NO RESPONSE. The bus "
+                              "does not confirm the cut; verify visually.")
+        elif code == BUFFER_STATE_MIDDLE:
+            gcmd.respond_info("CFS_CUT: post-cut buffer reads middle (filament staged; "
+                              "the reading every observed real cut produced). Note the "
+                              "bus does not directly confirm the cut.")
+        elif code == BUFFER_STATE_EMPTY:
+            gcmd.respond_info("CFS_CUT: post-cut buffer reads EMPTY (nothing staged at "
+                              "the blade -- empty slot; not a failure).")
         else:
-            gcmd.respond_info("CFS_CUT: cut_state 0x05 -> 0x%02X NOT-OK -- the cut may have "
-                              "FAILED. Inspect before continuing." % code)
+            gcmd.respond_info("CFS_CUT: post-cut buffer reads 0x%02X (%s) -- unexpected; "
+                              "inspect before continuing."
+                              % (code, BUFFER_STATE_NAMES.get(code, "unknown")))
 
     cmd_CFS_FLUSH_help: str = (
         "Purge the old filament through the hotend after a tool change, in capped cycles "
@@ -3108,8 +3683,10 @@ class CrealityCFS:
         Per cycle: read the measuring wheel, purge, M400, re-read -- the wheel turns
         because the hotend pulls filament through it, so an advance below
         FLUSH_WHEEL_MIN_FRAC of the purged length means the path is clogging and the flush
-        aborts with a recoverable error (the clog watchdog). The check is skipped whenever
-        a wheel read returns None, so a printer whose filament path has no wheel (or a
+        aborts with a recoverable error (the clog watchdog, key845). The watchdog is armed
+        only for cycles >= 2x buffer_empty_len (stock: shorter moves can be absorbed by
+        the buffer spring without turning the upstream wheel) and is skipped whenever a
+        wheel read returns None, so a printer whose filament path has no wheel (or a
         flaky read) can never false-abort. An optional nozzle_clean_macro runs once per
         cycle (the wipe). Ends with the 1.5 mm retract.
 
@@ -3142,8 +3719,20 @@ class CrealityCFS:
             self.gcode.run_script_from_command("G1 E%.3f F%.0f" % (cyc, velocity))
             self.gcode.run_script_from_command("M400")
             mm1 = self.measuring_wheel_mm(addr)
-            if (mm0 is not None and mm1 is not None
+            # BUFFER GATE (stock, buffer spec 4.3.6): the wheel sits UPSTREAM of the
+            # buffer, so a purge shorter than 2x buffer_empty_len can be absorbed entirely
+            # by the buffer spring and legitimately never turns the wheel. Stock arms the
+            # wheel-diff clog watchdog only for moves >= that length; shorter cycles run
+            # unchecked. Without this gate the short tail cycles (e.g. the 21.25 mm cycle
+            # of a 101.25 mm split) could false-trip the watchdog.
+            watchdog_armed = (cyc >= 2.0 * self.buffer_empty_len)
+            if (watchdog_armed and mm0 is not None and mm1 is not None
                     and abs(mm1 - mm0) < cyc * FLUSH_WHEEL_MIN_FRAC):
+                # The wheel did not track the purge -- an under-feed/clog. Latch key845
+                # ("the nozzle is blocked" -- the key the stock wire raises at wheel diff
+                # 0.0 during a flush; the pre-audit key859 was a misattribution) before
+                # raising the recoverable error.
+                self._record_error(845)
                 raise gcmd.error(
                     "CFS_FLUSH: under-feed/clog -- the hotend extruded %.1f mm but the "
                     "measuring wheel advanced only %.1f mm. Clear the filament path and "
@@ -3188,6 +3777,29 @@ class CrealityCFS:
                 gcmd.respond_info(f"CFS box {addr}: no version response")
         except Exception as exc:
             raise gcmd.error(f"CFS_FW_VERSION failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Flat stock-shaped `box` status adapter (box_wrapper §5a)
+# ---------------------------------------------------------------------------
+
+class CFSBoxStatus:
+    """Lightweight companion Klipper object registered as `box`.
+
+    box_wrapper §5a: the stock CFS orchestrator registers as the object `box` and its
+    get_status returns a FLAT dict (state/filament/map/same_material/cut_state/
+    auto_refill/enable/filament_useup/T1..T4). The Creality touchscreen CFS panel and the
+    StoneLabs UIs read printer.box.* and expect exactly that shape -- the nested
+    printer.creality_cfs.* status this module exports for its own macros has zero key
+    overlap with it. This adapter owns no state; it simply projects CrealityCFS's live
+    state into the stock flat shape on every get_status poll.
+    """
+
+    def __init__(self, cfs) -> None:
+        self._cfs = cfs
+
+    def get_status(self, eventtime) -> dict:
+        return self._cfs._flat_box_status()
 
 
 # ---------------------------------------------------------------------------

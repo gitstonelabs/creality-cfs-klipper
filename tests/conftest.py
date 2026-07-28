@@ -15,7 +15,7 @@ Transport note (v1.3.0 / B1):
   pre-B1 per-attempt path did: it calls self._serial.reset_input_buffer() + write(req),
   then reassembles one frame from chunked self._serial.read() calls (the old
   _read_response framing). Tests still push bytes into _serial.response_queue and inspect
-  _serial.write — only the plumbing underneath moved to the _txn seam.
+  _serial.write; only the plumbing underneath moved to the _txn seam.
 
 Provides:
   - mock_serial: A MagicMock standing in for the byte transport, with a configurable

@@ -631,3 +631,47 @@ class TestAutoAddressingSequence:
         entry = cfs._box_table[0]
         assert entry.addr == 0x01
         assert entry.online == BoxAddressEntry.ONLINE_ONLINE
+
+
+# ===========================================================================
+# CMD_TIMEOUTS: stock timing budgets (AUDIT REGRESSION 2026-07-19)
+# ===========================================================================
+
+class TestCommandTimeoutBudgets:
+    """The per-command timeouts must track the STOCK on-wire budgets, not invented
+    values. Stock (box-connect capture, 2026-06-29): addressing = 1.0 s discovery /
+    0.05 s assign+table / 0.1 s online-check; the box operational family runs at to=2.
+    Observed reply latencies (0x0A 60-125 ms steady; the 0x14 version reply ~1.05 s
+    late at boot) sit ABOVE the pre-audit 0.1 s, which clipped real replies and made
+    the retry re-send into the half-duplex bus mid-answer."""
+
+    def test_addressing_layer_keeps_stock_auto_addr_values(self):
+        from creality_cfs import (CMD_TIMEOUTS, CMD_LOADER_TO_APP as _LTA,
+                                  TIMEOUT_LONG, TIMEOUT_SHORT, TIMEOUT_MEDIUM)
+        assert CMD_TIMEOUTS[CMD_GET_SLAVE_INFO] == TIMEOUT_LONG == 1.0
+        assert CMD_TIMEOUTS[CMD_SET_SLAVE_ADDR] == TIMEOUT_SHORT == 0.05
+        assert CMD_TIMEOUTS[CMD_GET_ADDR_TABLE] == TIMEOUT_SHORT == 0.05
+        assert CMD_TIMEOUTS[CMD_ONLINE_CHECK] == TIMEOUT_MEDIUM == 0.1
+        assert CMD_TIMEOUTS[_LTA] == TIMEOUT_SHORT == 0.05
+
+    def test_operational_family_uses_stock_to2_budget(self):
+        from creality_cfs import (
+            CMD_TIMEOUTS, TIMEOUT_OPERATIONAL,
+            CMD_GET_HARDWARE_STATUS, CMD_CUT_STATE, CMD_MEASURING_WHEEL,
+            CMD_CTRL_CONNECTION_MOTOR_ACTION, CMD_GET_FILAMENT_SENSOR_STATE,
+            CMD_GET_REMAIN_LEN, CMD_GET_BUFFER_STATE, CMD_VERSION_INFO,
+        )
+        assert TIMEOUT_OPERATIONAL == 2.0
+        for cmd in (CMD_SET_BOX_MODE, CMD_GET_BOX_STATE, CMD_GET_HARDWARE_STATUS,
+                    CMD_CUT_STATE, CMD_MEASURING_WHEEL,
+                    CMD_CTRL_CONNECTION_MOTOR_ACTION, CMD_SET_PRE_LOADING,
+                    CMD_GET_VERSION_SN, CMD_GET_FILAMENT_SENSOR_STATE,
+                    CMD_GET_REMAIN_LEN, CMD_GET_BUFFER_STATE, CMD_VERSION_INFO):
+            assert CMD_TIMEOUTS[cmd] == TIMEOUT_OPERATIONAL, hex(cmd)
+
+    def test_choreography_blocking_replies_keep_hold_covering_timeouts(self):
+        from creality_cfs import (CMD_TIMEOUTS, CMD_EXTRUDE_PROCESS,
+                                  CMD_RETRUDE_PROCESS, EXTRUDE_STAGE_TIMEOUT_S,
+                                  RETRUDE_START_TIMEOUT_S)
+        assert CMD_TIMEOUTS[CMD_EXTRUDE_PROCESS] == EXTRUDE_STAGE_TIMEOUT_S == 15.0
+        assert CMD_TIMEOUTS[CMD_RETRUDE_PROCESS] == RETRUDE_START_TIMEOUT_S == 22.0

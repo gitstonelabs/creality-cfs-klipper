@@ -121,10 +121,11 @@ CFS_EXTRUDE TOOL=2
 CFS_EXTRUDE TOOL=0 BOX=1 TEMP=235
 ```
 
-Sequence: blocking M109 melt guard, 0x04 `[00][slot]` enter feed mode, 0x0F
-engage the feeder motor, one-shot 0x08 liveness ping (logged, not a gate),
-the sensor-gated 0x10 push loop, 0x05 cut check, 0x04 `[slot][00]` print
-mode, 0x0F release.
+Sequence: blocking M109 melt guard, 0x04 `[00][01]` enter feed mode (a FIXED
+byte pair for every slot; audit fix 2026-07-19), 0x0F engage the feeder
+motor, one-shot 0x08 liveness ping (logged, not a gate), the sensor-gated
+0x10 push loop, one 0x05 buffer verification (expect middle; logged, not
+gated), 0x04 `[slot][00]` print mode, 0x0F release.
 
 Every 0x10 frame carries three data bytes `[slot][stage_hi][stage_lo]`:
 `00 00` init/arm, `04 00` engage, `05 00` push+measure, `06 00` settle,
@@ -169,7 +170,8 @@ CFS_RETRUDE TOOL=0
 CFS_RETRUDE TOOL=1 TEMP=235
 ```
 
-Sequence: blocking M109 melt guard, 0x04 `[00][slot]` enter feed mode, 0x08
+Sequence: blocking M109 melt guard, 0x04 `[00][01]` enter feed mode (fixed
+pair; audit fix 2026-07-19), 0x08
 `[00]` material sensor read, START 0x11 `[slot][00]`, ONE toolhead
 `G1 E-15 F360` pull, 0x08 `[01]` connections read, FINISH 0x11 `[slot][01]`.
 Both 0x11 frames carry the slot bitmask and both ACK with the same bare
@@ -190,8 +192,10 @@ Parameters:
 ### CFS_CUT
 
 Mechanical filament cut. The cut is MECHANICAL: the toolhead rams the
-frame-mounted blade lever. There is no bus cut command; 0x05 CUT_STATE only
-reads the result the controller latches afterward.
+frame-mounted blade lever. There is no bus cut command, and no bus
+cut-result read either (re-pinned 2026-07-19): the 0x05 post-read is the
+BUFFER state, kept as a corroboration signal; stock confirms the cut via
+the toolhead cutter switch.
 
 ```
 CFS_CUT
@@ -208,8 +212,9 @@ Safety rails (ported from the validated implementation):
 - Blocking M109 preheat before severing (cold filament shatters or resists
   the blade).
 
-Post-check via 0x05: 0x00 = cut OK, 0x02 = nothing to cut (empty slot, not a
-failure), anything else is surfaced as cut not confirmed.
+Post-check via the 0x05 buffer read: middle (0x00) is what every observed
+real cut produced; empty (0x02) means nothing was staged at the blade (empty
+slot, not a failure); anything else is surfaced for inspection.
 
 Parameters:
 - `BOX`: controller address (1-4, optional, default 1)
@@ -241,7 +246,11 @@ Wire-verified breakdowns: 158.75 -> [80, 78.75]; 343.33 -> [80, 65.83 x4];
 
 Each cycle: read the measuring wheel (0x0E), `G1 E` purge, M400, re-read. If
 the wheel advanced less than 30 percent of the purged length, the path is
-clogging and the flush aborts with a recoverable error. The check is skipped
+clogging and the flush aborts with a recoverable error latching key845 (the
+key the stock wire raises at wheel diff 0.0). The watchdog is armed only for
+cycles of at least 2x `buffer_empty_len` (60 mm stock): shorter moves can be
+absorbed by the buffer spring without turning the upstream wheel, so they
+run unchecked, exactly as stock gates them. The check is also skipped
 whenever a wheel read returns None, so a rig without the wheel in the path
 never false-aborts. An optional `nozzle_clean_macro` runs once per cycle.
 Ends with a 1.5 mm retract.
@@ -268,12 +277,12 @@ wire-confirmed 2026-06-19:
   (01 00 / 02 00 / 04 00 / 08 00, keyed to the active slot; locks the slot
   for printing).
 - Enter/feed form: supply `MODE=` (and optional `PARAM=`, default 1) to send
-  `[MODE][PARAM]`. `MODE=0 PARAM=<slot bitmask>` is the `[00][slot]` enter
-  feed mode frame that brackets a tool change.
+  `[MODE][PARAM]`. The stock enter-feed frame is the FIXED pair `[00][01]`
+  (`MODE=0 PARAM=1`); the slot is never carried in this frame.
 
 ```
 CFS_SET_MODE BOX=1 TOOL=1            # print mode for slot T1 (02 00)
-CFS_SET_MODE BOX=1 MODE=0 PARAM=1    # enter feed mode for slot T0 (00 01)
+CFS_SET_MODE BOX=1 MODE=0 PARAM=1    # enter feed mode (the stock 00 01 pair)
 ```
 
 Parameters:
@@ -348,7 +357,7 @@ call inside a choreography is clamped to the remaining wall budget.
 | Load wall budget | 90 s | whole sensor-gated load |
 | Unload wall budget | 60 s | whole unload including the switch-clear wait |
 | Connect wake probe (0x0A) | 12 s single shot, up to 8 retries | the slave-MCU needs ~9.5 s after the 0xA0 assign; the first 0x0A after quiet legitimately returns None |
-| Short queries (0x02/0x03/0x05/0x08/0x0A/0x0E/0x14/0xF0...) | 0.05-1.0 s, with retries | normal request/reply; the all-slot 0x02/0x03 presence read gets a long timeout (~11 s scan) |
+| Short queries (0x02/0x03/0x05/0x08/0x0A/0x0E/0x14/0xF0...) | 2.0 s, with retries | the stock to=2 operational budget (audit fix 2026-07-19; the earlier 0.1 s default clipped real replies); the all-slot 0x02/0x03 presence read gets a long timeout (~11 s scan) |
 
 The pre-v1.4.0 0.5 s timeout on 0x10/0x11 could never see the held replies,
 which is why an unload could never be confirmed on real hardware.
@@ -395,10 +404,10 @@ UNTESTED.
 | `BOX_GET_VERSION_SN` | 0x14 | 22-byte firmware version + serial number |
 | `BOX_GET_RFID` | 0x02 | Shares the READ_MATERIAL func; tag-label decode pending a tagged-spool capture |
 | `BOX_GET_REMAIN_LEN` | **0x03** | Slot-bitmask selected; positional 4-byte reply, 0xFF = not-in-mask sentinel (an earlier revision wrongly listed 0x0F, which is the connection-motor action) |
-| `BOX_GET_BUFFER_STATE` | **0x0C** | Buffer/feeder node (0x81+) 8-byte block; all-zero = empty |
+| `BOX_GET_BUFFER_STATE` | **0x05** | Buffer shuttle position on the box: 0x00 middle / 0x01 full / 0x02 empty (re-pinned 2026-07-19; the 0x0C-on-0x81 block is demoted to a servo-entangled diagnostic) |
 | `BOX_GET_FILAMENT_SENSOR_STATE` | **0x02** | ASCII per-slot material map `A:unknown;B:none;...`, slot-bitmask selected |
 | `BOX_GET_HARDWARE_STATUS` | **0x08** | `[channel]` -> 1 flag byte; 0x01 is the idle value |
-| `BOX_SET_BOX_MODE` | 0x04 | `[00][slot]` enter feed mode; `[slot][00]` per-slot print mode |
+| `BOX_SET_BOX_MODE` | 0x04 | `[00][01]` enter feed mode (fixed pair); `[slot][00]` per-slot print mode |
 | `BOX_SET_PRE_LOADING` | 0x0D | `[mask][phase]`; arm 0x00, disarm 0x01, slot re-arm 0x02 |
 | `BOX_SET_CURRENT_BOX_IDLE_MODE` | UNKNOWN | Set per-slot idle mode |
 | `BOX_SET_TEMP` | UNKNOWN | Set temperature target |
@@ -415,7 +424,7 @@ UNTESTED.
 | `BOX_RETRUDE_PROCESS` | **0x11** | START/FINISH unload pair, both frames carry the slot bitmask |
 | `BOX_CUT_MATERIAL` | UNKNOWN | Cut filament (the observed cut is mechanical, toolhead-driven) |
 | `BOX_CUT_POS_DETECT` | UNKNOWN | Detect/calibrate cutter position |
-| `BOX_CUT_STATE` | **0x05** | Read-only cut state: 0x00 cut OK, 0x01 transient, 0x02 nothing to cut |
+| `BOX_CUT_STATE` | **0x05** | Superseded label: the addr-0x01 0x05 read is the BUFFER state (0x00 middle / 0x01 full / 0x02 empty); the real cut-state 0x05 lives on the motor addrs 0x81/0x82 |
 | `BOX_CUT_HALL_ZERO` | UNKNOWN | Zero the cutter hall sensor |
 | `BOX_CUT_HALL_TEST` | UNKNOWN | Test the cutter hall sensor |
 | `BOX_MOVE_TO_CUT` | UNKNOWN | Move toolhead to cut position |
@@ -538,8 +547,9 @@ The cutter is mechanical: the toolhead rams past the right side of travel
 into the frame-mounted blade lever, which depresses the blade
 (`cut_pos_x: 283.5` past `pre_cut_pos_x: 240` on the reference Hi, see
 `configs/printer.cfg.example`). A microswitch or hall sensor
-(`cut_switch_pin`) confirms the mechanism; 0x05 CUT_STATE reads the latched
-result afterward.
+(`cut_switch_pin`) confirms the mechanism; the post-cut 0x05 read is the
+BUFFER state (a corroboration signal, not a cut result; re-pinned
+2026-07-19).
 
 ---
 

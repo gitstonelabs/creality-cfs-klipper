@@ -164,11 +164,18 @@ A single-box setup (the Creality Hi) puts the controller at `0x01` and every box
 operation goes to `addr=0x01` with the slot in the data bytes. Multi-box daisy-chains
 add CONTROLLERS at `0x02`-`0x04`; that is a separate axis from tool slots.
 
-**Buffer nodes (0x81+).** On the CFS side, nodes at `0x81` and up answer only
-CMD_GET_BUFFER_STATE (0x0C). On the reference printer the X/Y FOC servos share the same
-RS485 bus at `0x81`/`0x82`, so func-0x11 frames captured at those addresses are servo
-traffic, not CFS retrude commands. An earlier revision documented a "buffer-node retrude"
-form based on those frames; it is wire-disproven and removed.
+**The 0x81+ nodes.** On the reference printer the X/Y FOC servos share the same RS485
+bus at `0x81`/`0x82`, so func-0x11 frames captured at those addresses are servo
+traffic, not CFS retrude commands. An earlier revision documented a "buffer-node
+retrude" form based on those frames (wire-disproven, removed) and a "buffer node
+0x0C read" (demoted 2026-07-19; the real buffer read is func 0x05 on the box; see the
+0x05 and 0x0C sections).
+
+**Broadcast replies come from the slave's own unicast address.** A box answering the
+0xFE SET_SLAVE_ADDR broadcast replies as `f7 01 11 00 a0 ...` (frame address `0x01`,
+not `0xFE`). A host that requires the reply to echo the broadcast destination will drop
+every discovery/assign answer; response matching for broadcast requests must key on the
+function code alone (audit fix 2026-07-19).
 
 ---
 
@@ -211,6 +218,17 @@ connect-init burst: enter feed mode (0x04), read version (0x14), the two-frame p
 self-check (0x0D, see below) with 0x08 hardware reads, and the all-slot presence read
 (0x02/0x03), which itself can hold about 11 seconds while the box scans all four bays.
 
+**Command timing budgets (audit fix 2026-07-19).** Stock budgets the box operational
+family (0x04/0x14/0x0D begin+phase1/0x08/0x02/0x03) at `to=2` on the wire and the
+steady 0x0A poll at `to=3600` (a poll cadence under stock's free-running reader thread,
+not a hard reply deadline). Observed reply latencies: 0x0A runs 60-125 ms steady and
+the 0x14 version reply lands about 1.05 s late at boot. The module therefore uses a
+2.0 s hard deadline for the operational family (the earlier 0.1 s default was an
+invented carry-over from the auto_addr heartbeat and sat below the observed latencies,
+so real replies were clipped and the retry re-sent into the half-duplex bus
+mid-answer). Addressing-layer timeouts stay at the stock auto_addr values
+(1.0 s discovery, 0.05 s assign/table, 0.1 s online-check).
+
 ---
 
 ## Command Set
@@ -236,10 +254,10 @@ the reference implementation.
 | 0x02 | CMD_READ_MATERIAL | `[slot_mask]` | ASCII per-slot material map |
 | 0x03 | CMD_READ_REMAIN | `[slot_mask]` | 4 positional bytes, 0xFF sentinels |
 | 0x04 | CMD_SET_BOX_MODE | `[b0][b1]`, two forms | ACK |
-| 0x05 | CMD_CUT_STATE | `[]` empty | 1 state byte |
+| 0x05 | CMD_GET_BUFFER_STATE | `[]` empty | 1 byte: buffer shuttle position (0 middle / 1 full / 2 empty) |
 | 0x08 | CMD_GET_HARDWARE_STATUS | `[channel]` | 1 flag byte |
 | 0x0A | CMD_GET_BOX_STATE | `[]` empty | 4-byte state word |
-| 0x0C | CMD_GET_BUFFER_STATE | `[0x0B]` | 8-byte block (buffer node 0x81+) |
+| 0x0C | (diagnostic) 8-byte block on 0x81+ | `[0x0B]` | see the 0x0C section: servo-entangled, demoted |
 | 0x0D | CMD_SET_PRE_LOADING | `[mask][phase]` | ACK (STATUS 0x00) / NAK (0x16) |
 | 0x0E | CMD_MEASURING_WHEEL | `[0x01]` | 4-byte big-endian IEEE-754 float |
 | 0x0F | CMD_CTRL_CONNECTION_MOTOR_ACTION | `[0x01]` engage / `[0x00]` release | ACK |
@@ -305,30 +323,45 @@ RSP: ACK (STATUS 0x00)
 
 | Form | Payload | Meaning |
 |------|---------|---------|
-| Feed/change mode | `[0x00][slot]` | Enter feed mode for the slot. Required before a load or unload; without it the 0x0F engage does not drive the rollers. The boot/connect form uses slot `0x01`. |
+| Feed/change mode | `[0x00][0x01]` (fixed pair) | Enter feed mode. Required before a load or unload; without it the 0x0F engage does not drive the rollers. The second byte is the literal `0x01` for EVERY slot: the stock wire shows `04 00 01` preceding slot-2, slot-3 and full-quit operations alike. An earlier `[0x00][slot]` reading was an invented generalization never observed on the wire; the slot is selected by the 0x10/0x11 frames and the print-mode form, never here. |
 | Per-slot print mode | `[slot][0x00]` | Latch the slot as loaded/print-locked. Observed `01 00` / `02 00` / `04 00` keyed to the active slot. GET_BOX_STATE data[3] goes to `0x02` in lockstep with this command. |
 
 ---
 
-## CMD_CUT_STATE (0x05): read-only
+## CMD_GET_BUFFER_STATE (0x05): the filament-buffer read (RE-PINNED 2026-07-19)
 
-The physical cut is mechanical: the toolhead rams the cutter arm. There is no cut
-command on the wire. 0x05 only reads the state the controller latches afterwards.
+The addr-0x01 func-0x05 read is the spring-shuttle FILAMENT BUFFER position, not a
+cut-state read. The 2026-06-25 stock captures show the vendor .so decoding this exact
+frame as `cmd: GET_BUFFER_STATE` with `buffer_state: 0x0` / `middle` narration; the
+CAN-build bytecode carries the same command with a byte-confirmed 3-value enum. The
+earlier CUT_STATE label (a 2026-06-09 hand-decode) was a misattribution: the real
+cut-state 0x05 lives on the MOTOR addresses 0x81/0x82 (self-check only).
 
 ```
-REQ: f7 [addr] 03 ff 05 [crc]        (no data)
+REQ: f7 [addr] 03 ff 05 [crc]        (no data byte, no slot byte)
 RSP: f7 [addr] 04 00 05 [state] [crc]
 ```
 
 | State | Meaning |
 |-------|---------|
-| 0x00 | Cut OK. Every real cut returns this. |
-| 0x01 | Transient cut-state-set, seen during a real cut. |
-| 0x02 | Nothing to cut: slot empty / no filament at the blade. Not a failure. |
+| 0x00 | middle: shuttle between the limits (the normal post-load reading) |
+| 0x01 | full: shuttle at the FULL limit |
+| 0x02 | empty: shuttle at the EMPTY limit / nothing staged |
 
-Decoded 2026-06-22 from a stock-vs-empty capture comparison. A failing-cut
-counter-example (filament present, blade jammed) is still uncaptured, so any other
-value should be treated as "cut not confirmed".
+Honesty note: the enum is byte-confirmed from the CAN-build bytecode and the Hi .so
+carries the matching narration strings, but only `0x00` (middle) has actually been
+captured on the Hi wire; `0x01`/`0x02` are bytecode-derived, not Hi-wire-confirmed.
+
+The 2026-06-22 "cut state" decode observed this same byte after cuts and misread the
+buffer enum as cut results: a real cut of a loaded path reads middle (0x00), an empty
+slot reads empty (0x02). The bus does NOT confirm the cut; stock confirms it via the
+toolhead cutter switch.
+
+Usage discipline (stock): the host reads this ONLY at choreography seams (one post-load
+verification expecting middle, the gear-grind drain check, pre-cut). There is NO
+periodic buffer poll: across a 52-minute 3-color stock print the read appears exactly
+six times, each right after a feed. The box firmware runs the buffer feed loop
+internally; do not build a host-side polling or top-up loop on this command.
 
 ---
 
@@ -393,19 +426,22 @@ wire-disproven (b0/b1 drift per firmware and carry no state).
 
 ---
 
-## CMD_GET_BUFFER_STATE (0x0C)
+## The 0x0C 8-byte block on 0x81+ (DEMOTED to diagnostic, 2026-07-19)
 
-Sent to a buffer/feeder node at `0x81` and up, not to a box controller.
+An earlier revision documented this as "GET_BUFFER_STATE on a buffer node". That
+binding is superseded: the REAL buffer read is func 0x05 on the box (previous section),
+and the 0x0C-on-0x81 read is entangled with X/Y FOC-servo traffic (the identical frame
+also goes to 0x82, the Y servo on the reference printer, inside the cut/retract
+servo-arm preamble). Treat it as servo/param traffic until a directed capture re-pins
+its role (open item BOX-G7/U3).
 
 ```
-REQ: f7 [buffer_addr] 04 ff 0c 0b [crc]
-RSP: f7 [buffer_addr] .. 00 0c [8 bytes] [crc]
+REQ: f7 [node_addr] 04 00 0c 0b [crc]     (STATUS 0x00 -- every captured 0x0C TX)
+RSP: f7 [node_addr] .. 00 0c [8 bytes] [crc]
 ```
 
-The reply is an 8-byte block. All-zero means the buffer is empty (filament parked
-short). The per-byte decode of a non-empty block is not yet mapped. 0x0C is the only
-function these nodes answer on the CFS protocol; see the topology note above about
-servo traffic sharing the 0x81/0x82 addresses on the reference printer.
+The module keeps a diagnostic-only reader (`read_buffer_block_0x0c`); nothing in the
+choreography consumes it.
 
 ---
 
@@ -636,10 +672,13 @@ was observed in the wire captures. This module does not implement the callback p
 
 ---
 
-## Buffer State
+## Buffer State (GPIO lines and the 0x05 read)
 
-Buffer state is **not communicated over RS485**. The buffer switch signals on
-pins 2 and 3 of the 6-pin connector are direct GPIO lines:
+The buffer never PUSHES its state: triggering it by hand generates zero RS485 traffic.
+The box MCU reads the shuttle switches and serves the interpreted 3-state byte on
+demand as func 0x05 (see CMD_GET_BUFFER_STATE above); the stock host polls that only at
+choreography seams. The raw switch signals on pins 2 and 3 of the 6-pin connector are
+direct GPIO lines:
 
 - Pin 2 (white): `0.01V idle / 3.3V triggered` = buffer triggered (active high)
 - Pin 3 (black): `3.3V idle / 0.01V triggered` = inverted pair (active low)
@@ -655,8 +694,9 @@ runout_gcode:
     RESPOND MSG="CFS buffer triggered"
 ```
 
-(The RS485 CMD_GET_BUFFER_STATE (0x0C) above reads the separate buffer/feeder NODE at
-0x81+, which is a different device from these per-segment GPIO switch lines.)
+(The interpreted RS485 read of the same shuttle is func 0x05 on the box. The direct
+GPIO tap is a mainline-only extra: keep `pause_on_runout: false`, because a buffer edge
+is NORMAL during loads and tool changes.)
 
 ---
 
@@ -697,10 +737,13 @@ From `strings` analysis of `box_wrapper.cpython-39.so`:
 | key840 | box switch state error |
 | key841 | cut error: cut sensor not detected, not rebounded |
 | key843 | RFID error: get rfid failed |
+| key845 | the nozzle is blocked (wire-confirmed: raised by the flush wheel watchdog at diff 0.0) |
 | key846 | empty printing: box speed < extruder speed |
+| key847 | empty printing: material enwind (pushed via the 0x0A status byte) |
 | key848 | material error: may be broken at connections |
 | key849 | retrude error: failed to exit connections |
 | key850 | retrude error: multiple connections triggered |
+| key851 | retrude error: buffer empty limit not triggered |
 | key852 | check extruder filament sensor and box sensor state |
 | key853 | humidity sensor error |
 | key854 | filament present when cutting detected |
@@ -709,6 +752,7 @@ From `strings` analysis of `box_wrapper.cpython-39.so`:
 | key857 | motor load error |
 | key858 | errprom (EEPROM) error |
 | key859 | measuring wheel error |
+| key860 | buffer error (hardware self-test at connect/init) |
 | key861 | left RFID card error |
 | key862 | right RFID card error |
 | key864 | extrude error: buffer full limit not triggered |

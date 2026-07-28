@@ -91,8 +91,13 @@ extrude_temp: 220
 #cut_velocity: 3000
 
 # ---- Optional: flush tuning --------------------------------------------------
-#nozzle_volume: 183
-#   Melt-zone volume (mm^3); flush base length = nozzle_volume / 2.4.
+#nozzle_volume: 108
+#   Melt-zone volume (mm^3); flush base length = nozzle_volume / 2.4. Default 108
+#   matches the stock CFS compiled default; raise it (e.g. 183) for a longer purge base.
+#buffer_empty_len: 30
+#   Filament-buffer capacity in mm (stock default 30, bounds 0-60). The flush clog
+#   watchdog arms only for purge cycles of at least 2x this length; shorter moves can
+#   be absorbed by the buffer spring without turning the measuring wheel.
 #nozzle_clean_macro: WIPE_NOZZLE
 #   A [gcode_macro] run once per flush cycle (your wipe routine).
 #flush_cycle_cap: 80

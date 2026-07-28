@@ -318,7 +318,8 @@ class MockCFSHardware:
                              bytes([0x01]))
 
     def _resp_cut_state(self, addr, data):
-        """CMD_CUT_STATE: return 0x00 (cut OK)."""
+        """0x05 GET_BUFFER_STATE (historical name CUT_STATE): return 0x00 (buffer middle,
+        the only value ever captured on the Hi wire)."""
         slot = addr - 1
         if not (0 <= slot < self.box_count):
             return None

@@ -116,10 +116,11 @@ class TestCutHappyPath:
         assert any(s.startswith("M109") for s in scripts)
         assert "M400" in scripts
 
-        # The 0x05 cut-state read actually went out on the wire.
+        # The 0x05 post-cut read actually went out on the wire (RE-PINNED 2026-07-19: the
+        # byte is the BUFFER state, not a cut confirmation).
         hw.assert_command_received(CMD_CUT_STATE)
-        # Mock returns 0x00 -> cut confirmed.
-        assert any("cut confirmed" in s for s in _infos(gcmd))
+        # Mock returns 0x00 -> buffer middle (the reading every observed real cut produced).
+        assert any("buffer reads middle" in s for s in _infos(gcmd))
 
     def test_m109_precedes_the_ram_moves(self):
         # Heat-before-move: the blocking M109 must be emitted before any G0 ram.
@@ -290,6 +291,30 @@ class TestFlushClogWatchdog:
         gcmd = _fake_gcmd(ints={"BOX": 1}, floats={"LEN": 80.0, "TEMP": 250.0})
         cfs.cmd_CFS_FLUSH(gcmd)   # completes cleanly
         assert any("complete" in s for s in _infos(gcmd))
+
+    def test_clog_latches_key845(self):
+        """BUFFER-SPEC REGRESSION (2026-07-19): the wheel-diff clog raises key845 ('the
+        nozzle is blocked' -- the key the stock wire raises at diff 0.0), NOT key859."""
+        hw, cfs, ser = _wired()
+        cfs.measuring_wheel_mm = mock.MagicMock(return_value=-100.0)
+        gcmd = _fake_gcmd(ints={"BOX": 1}, floats={"LEN": 80.0, "TEMP": 250.0})
+        with pytest.raises(Exception, match="under-feed/clog"):
+            cfs.cmd_CFS_FLUSH(gcmd)
+        assert cfs._last_error["code"] == 845
+        assert cfs._last_error["msg"] == "the nozzle is blocked"
+
+    def test_short_cycle_skips_watchdog(self):
+        """BUFFER-SPEC REGRESSION: purges shorter than 2x buffer_empty_len (60 mm) can be
+        absorbed by the buffer spring without turning the upstream wheel, so the watchdog
+        must NOT arm for them (stock gates the diff check on that length)."""
+        hw, cfs, ser = _wired()
+        # A stuck wheel that WOULD trip the watchdog if armed.
+        cfs.measuring_wheel_mm = mock.MagicMock(return_value=-100.0)
+        assert 50.0 < 2.0 * cfs.buffer_empty_len
+        gcmd = _fake_gcmd(ints={"BOX": 1}, floats={"LEN": 50.0, "TEMP": 250.0})
+        cfs.cmd_CFS_FLUSH(gcmd)   # completes cleanly; watchdog never armed
+        assert any("complete" in s for s in _infos(gcmd))
+        assert cfs._last_error is None
 
 
 # ===========================================================================

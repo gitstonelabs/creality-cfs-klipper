@@ -26,8 +26,10 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run full test suite
+        env:
+          PYTHONPATH: src
         run: |
-          pytest --cov=src/creality_cfs \
+          pytest --cov=creality_cfs \
                  --cov-fail-under=80 \
                  tests/ -v
 

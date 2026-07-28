@@ -58,6 +58,11 @@ from creality_cfs import (
     CMD_CTRL_CONNECTION_MOTOR_ACTION,
     CMD_MEASURING_WHEEL,
     CMD_RETRUDE_PROCESS,
+    CMD_GET_SLAVE_INFO,
+    CMD_SET_SLAVE_ADDR,
+    BROADCAST_ADDR_MB,
+    BROADCAST_ADDR_ALL,
+    BROADCAST_ADDRS,
     ADDR_BUFFER_NODE,
     SLOT_T0,
     SLOT_T1,
@@ -764,6 +769,83 @@ class TestReadPath:
 # ===========================================================================
 # _quiesce / _disconnect_serial (shutdown path)
 # ===========================================================================
+
+class TestBroadcastMatching:
+    """AUDIT REGRESSION (2026-07-19): a slave answers a broadcast from its OWN unicast
+    address (stock wire: TX `fe 10 00 a0 01 <uniid>` is ACKed by `f7 01 11 00 a0 ...`,
+    reply frame addr 0x01). A broadcast waiter must therefore match on the function code
+    alone; the pre-audit strict addr-echo match dropped every discovery/assign reply."""
+
+    def _armed(self, cfs, match):
+        comp = cfs.reactor.completion()
+        cfs._pending = comp
+        cfs._pending_match = match
+        cfs._rx_buf = bytearray()
+        cfs._fd = 11
+        return comp
+
+    def test_send_command_wildcards_addr_for_broadcast(self):
+        """_send_command passes match=(None, func) for a broadcast destination."""
+        cfs = _bare_cfs()
+        cfs.is_connected = True
+        cfs._fd = 11
+        seen = []
+
+        def fake_txn(request_bytes, timeout, match=None):
+            seen.append(match)
+            return None
+
+        cfs._txn = fake_txn
+        cfs._send_command(BROADCAST_ADDR_MB, STATUS_ADDRESSING, CMD_GET_SLAVE_INFO,
+                          data=bytes([BROADCAST_ADDR_MB, BROADCAST_ADDR_MB]), retries=1)
+        assert seen == [(None, CMD_GET_SLAVE_INFO)]
+
+    def test_send_command_keeps_strict_match_for_unicast(self):
+        """Unicast destinations keep the strict (addr, func) echo match."""
+        cfs = _bare_cfs()
+        cfs.is_connected = True
+        cfs._fd = 11
+        seen = []
+
+        def fake_txn(request_bytes, timeout, match=None):
+            seen.append(match)
+            return None
+
+        cfs._txn = fake_txn
+        cfs._send_command(0x01, STATUS_OPERATIONAL, CMD_GET_BOX_STATE, retries=1)
+        assert seen == [(0x01, CMD_GET_BOX_STATE)]
+
+    def test_broadcast_reply_from_unicast_addr_completes_waiter(self):
+        """A discovery reply from the box's own address (0x01) completes a broadcast
+        waiter armed with the wildcard-addr match."""
+        cfs = _bare_cfs()
+        reply = _good_frame(0x01, CMD_GET_SLAVE_INFO, bytes([0x01, 0x00]) + b"\x11" * 12)
+        comp = self._armed(cfs, (None, CMD_GET_SLAVE_INFO))
+        fake_os = make_fake_os(read_chunks=[reply])
+        with mock.patch.object(creality_cfs, "os", fake_os):
+            cfs._handle_readable(eventtime=1.0)
+        assert comp.test() is True
+        assert comp._value == reply
+
+    def test_broadcast_waiter_still_requires_func_echo(self):
+        """The wildcard is on the ADDRESS only: a frame with the wrong function code must
+        not complete a broadcast waiter."""
+        cfs = _bare_cfs()
+        wrong = _good_frame(0x01, CMD_GET_BOX_STATE, BOX_STATE_PAYLOAD_LOADED)
+        comp = self._armed(cfs, (None, CMD_GET_SLAVE_INFO))
+        fake_os = make_fake_os(read_chunks=[wrong])
+        with mock.patch.object(creality_cfs, "os", fake_os):
+            cfs._handle_readable(eventtime=1.0)
+        assert comp.test() is False
+        assert cfs._pending is comp
+
+    def test_broadcast_addr_set_covers_all_stock_pools(self):
+        """0xFC/0xFD are the stock CLM/BTM assignment pools; 0xFE/0xFF the MB/all
+        broadcasts. All four must wildcard."""
+        assert BROADCAST_ADDRS == (0xFC, 0xFD, 0xFE, 0xFF)
+        assert BROADCAST_ADDR_MB in BROADCAST_ADDRS
+        assert BROADCAST_ADDR_ALL in BROADCAST_ADDRS
+
 
 class TestShutdownPath:
     def test_quiesce_sets_shutdown_and_aborts_parked_pending_with_none(self):

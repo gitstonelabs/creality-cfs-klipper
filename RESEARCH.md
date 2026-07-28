@@ -101,11 +101,11 @@ are CRC-verified from live captures on the Hi RS485 wire:
 |------|------|-------|
 | 0x02 | READ_MATERIAL | Slot-bitmask selected; ASCII map reply (`A:unknown;B:none;...`) |
 | 0x03 | READ_REMAIN | Slot-bitmask selected; positional 4-byte reply, 0xFF = not-in-mask sentinel |
-| 0x04 | SET_BOX_MODE | `[0x00][slot]` enters feed mode; `[slot][0x00]` is the per-slot print mode |
-| 0x05 | CUT_STATE | Read-only, after the mechanical cut: 0x00 cut OK, 0x01 transient, 0x02 nothing to cut (slot empty) |
+| 0x04 | SET_BOX_MODE | `[0x00][0x01]` (fixed pair) enters feed mode; `[slot][0x00]` is the per-slot print mode. The slot never rides in the enter-feed frame (audit fix 2026-07-19) |
+| 0x05 | GET_BUFFER_STATE | Filament-buffer shuttle position on the box: 0x00 middle, 0x01 full, 0x02 empty (re-pinned 2026-07-19; the vendor .so narrates this frame as `buffer_state`). Enum bytecode-derived; only 0x00 wire-seen on the Hi. The earlier CUT_STATE label was a misattribution |
 | 0x08 | GET_HARDWARE_STATUS | `[channel]` request, 1 flag byte reply; 0x01 is the idle value |
 | 0x0A | GET_BOX_STATE | EMPTY request payload; 4-byte reply `[b0][b1][b2][b3]`: b0/b1 are an opaque drifting firmware base carrying no state, b2 is a substatus, b3 is the load flag (0x02 loaded/print-locked, 0x00 feed mode) |
-| 0x0C | GET_BUFFER_STATE | Buffer node (0x81+) only; 8-byte block, all-zero = empty |
+| 0x0C | (diagnostic) 0x81+ block read | Demoted 2026-07-19: entangled with FOC-servo traffic (the identical frame also goes to 0x82, the Y servo); role pending a directed capture |
 | 0x0D | SET_PRE_LOADING | `[mask][phase]`: arm `[0f][00]`, disarm `[0f][01]`, connect self-check `[00][01]` then `[0f][01]` only, per-slot re-arm `[slot][02]` (blocks ~38 s); reply STATUS 0x00 ACK, 0x16 NAK |
 | 0x0E | MEASURING_WHEEL | Data `[0x01]`; reply is a 4-byte big-endian IEEE-754 float, negative, magnitude grows as filament feeds |
 | 0x0F | CTRL_CONNECTION_MOTOR_ACTION | 0x01 engage, 0x00 release |
@@ -119,9 +119,10 @@ are CRC-verified from live captures on the Hi RS485 wire:
 One controller per CFS box, at bus address 0x01. Tools and slots are NOT bus
 addresses: they are a one-hot bitmask in the data bytes, 0x01/0x02/0x04/0x08 for
 T0 through T3. Multi-box daisy-chains are additional controllers at 0x02 to 0x04,
-a separate axis from tool slots. Buffer/feeder nodes at 0x81 and up answer only
-the 0x0C buffer-state read; function-0x11 frames observed at 0x81/0x82 on the
-reference printer are X/Y FOC servo traffic sharing the bus, not CFS retrude.
+a separate axis from tool slots. Function-0x11 frames observed at 0x81/0x82 on
+the reference printer are X/Y FOC servo traffic sharing the bus, not CFS
+retrude; the 0x0C-on-0x81 block read is likewise servo-entangled and demoted
+to a diagnostic (the real buffer read is func 0x05 on the box).
 
 ### Choreography findings
 
@@ -170,7 +171,7 @@ They are kept so old notes and forks can be reconciled.
   0x04 = GET_VERSION, 0x08 = GET_BOX_STATE, 0x0A = GET_BOX_SLOT,
   0x0C = SET_MODE, 0x0E = GET_SLOT_STATE, and 0xC0 = AUTO_ADDR. None of these
   match the wire. The actual assignments are in the table above: 0x04 is
-  SET_BOX_MODE, 0x08 is GET_HARDWARE_STATUS, 0x0A is GET_BOX_STATE, 0x0C is
+  SET_BOX_MODE, 0x08 is GET_HARDWARE_STATUS, 0x0A is GET_BOX_STATE, 0x05 is
   GET_BUFFER_STATE, 0x0E is MEASURING_WHEEL, and there is no 0xC0; addressing
   is the 0x0B/0xA0-0xA3 layer.
 - **LEN as total frame length.** LEN counts STATUS, FUNC, DATA, and CRC
@@ -178,6 +179,14 @@ They are kept so old notes and forks can be reconciled.
 - **The 0x10 reply as `[motor state 0xC3/0xC4][uint16 position]`.** A misparse.
   The payload is a 4-byte big-endian IEEE-754 float; the "state" byte was the
   float's exponent byte.
+- **0x05 as CUT_STATE and 0x0C as the buffer read.** Both superseded
+  2026-07-19: the addr-0x01 0x05 read is GET_BUFFER_STATE (the vendor .so's own
+  narration), and its byte is the buffer shuttle position, which the 2026-06-22
+  "cut state" decode had misread as cut results. The 0x0C-on-0x81 block is
+  servo-entangled and demoted to a diagnostic. There is no bus cut-result read;
+  stock confirms the cut via the toolhead cutter switch.
+- **`[0x00][slot]` as the enter-feed payload.** Invented; the stock wire sends
+  the fixed pair `[0x00][0x01]` for every slot.
 - **The 0x11 status-poll completion model.** Wire-disproven. Both 0x11 frames
   ACK with the bare status-0x00 frame and completion is gated on the toolhead
   filament switch, not a reply status.

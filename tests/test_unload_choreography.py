@@ -161,6 +161,55 @@ class TestUnloadProcessSensorless:
 
 
 # ===========================================================================
+# unload_process(): 0x11 failure -> key latches (buffer-spec mapping, 2026-07-19)
+# ===========================================================================
+
+class TestUnloadKeyLatches:
+    """Trigger-byte failure mapping: a phase-0 (buffer-empty-limit pull) no-reply latches
+    key851; a 0x14 reply on either frame latches key849. Diagnostic only: completion
+    still gates on the toolhead switch, so the unload itself proceeds."""
+
+    def test_start_no_reply_latches_key851(self):
+        hw, cfs, ser = _wired()
+        hw.set_loaded(0, True)
+        cfs._active_tool = 0
+        cfs._toolhead_filament_detected = _sequence_sensor([True, False])
+        hw.inject_error(hw.ERROR_TIMEOUT, on_command=CMD_RETRUDE_PROCESS)
+
+        gcmd = _make_gcmd(temp=250.0)
+        cfs.unload_process(gcmd, 0x01, SLOT_T0)
+
+        assert cfs._last_error is not None
+        assert cfs._last_error["code"] == 851
+        assert "buffer empty limit" in cfs._last_error["msg"]
+        infos = " ".join(c.args[0] for c in gcmd.respond_info.call_args_list)
+        assert "key851" in infos
+
+    def test_status_0x14_latches_key849(self):
+        hw, cfs, ser = _wired()
+        hw.set_loaded(0, True)
+        cfs._active_tool = 0
+        cfs._toolhead_filament_detected = _sequence_sensor([True, False])
+        # Force the 0x11 replies to carry STATUS 0x14 (in-progress/failed-to-exit).
+        orig = hw._resp_retrude
+
+        def _retrude_14(addr, data):
+            from creality_cfs import build_message as _bm
+            return _bm(addr, 0x14, CMD_RETRUDE_PROCESS)
+
+        hw._resp_retrude = _retrude_14
+        try:
+            gcmd = _make_gcmd(temp=250.0)
+            cfs.unload_process(gcmd, 0x01, SLOT_T0)
+        finally:
+            hw._resp_retrude = orig
+
+        assert cfs._last_error is not None
+        assert cfs._last_error["code"] == 849
+        assert "exit connections" in cfs._last_error["msg"]
+
+
+# ===========================================================================
 # unload_process(): recoverable JAM (switch never clears)
 # ===========================================================================
 

@@ -236,11 +236,58 @@ class TestSlotReads:
         hw.inject_error(hw.ERROR_TIMEOUT, on_command=CMD_GET_REMAIN_LEN)
         assert cfs.read_remain(0x01, PRELOAD_MASK_ALL) is None
 
-    def test_get_buffer_state_none_on_nonresponder(self):
+    def test_get_buffer_state_reads_0x05_on_the_box(self):
+        """BUFFER-SPEC REGRESSION (2026-07-19): the REAL buffer read is func 0x05 on the
+        BOX addr, no data byte (TX f7 01 03 ff 05); RX data[0] is the shuttle position
+        (0x00 middle / 0x01 full / 0x02 empty). The old 0x0C-on-0x81 binding is the
+        BOX-G7 servo-entangled read and is demoted to a diagnostic."""
+        hw, cfs, ser = _wired()
+        ser.write.reset_mock()
+        st = cfs.get_buffer_state(0x01)
+        assert st == {"code": 0x00, "state": "middle"}
+        req = ser.write.call_args_list[-1].args[0]
+        # frame = [HEAD][ADDR][LEN][STATUS][FUNC][CRC] -- no data byte, status 0xFF
+        assert req[1] == 0x01
+        assert req[2] == 0x03
+        assert req[3] == 0xFF
+        assert req[4] == 0x05
+        assert len(req) == 6
+        # the value is cached for get_status
+        assert cfs._buffer_state == 0x00
+
+    def test_get_buffer_state_rejects_node_addrs(self):
+        """0x05 on 0x81/0x82 is the MOTOR cut-state read (self-check only); the buffer
+        read must refuse to target the 0x81+ nodes."""
         hw, cfs, _ = _wired()
-        # the mock has no responder for a buffer/feeder node addr like 0x81 ->
-        # process_message returns None -> get_buffer_state hits the None branch
-        assert cfs.get_buffer_state(0x81) is None
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="targets the BOX"):
+            cfs.get_buffer_state(0x81)
+
+    def test_get_buffer_state_none_on_timeout(self):
+        hw, cfs, _ = _wired()
+        hw.inject_error(hw.ERROR_TIMEOUT, on_command=0x05)
+        assert cfs.get_buffer_state(0x01) is None
+
+    def test_buffer_state_surfaces_in_get_status(self):
+        hw, cfs, _ = _wired()
+        st0 = cfs.get_status(0.0)
+        assert st0["buffer"] == "unknown" and st0["buffer_code"] is None
+        cfs.get_buffer_state(0x01)
+        st1 = cfs.get_status(0.0)
+        assert st1["buffer"] == "middle" and st1["buffer_code"] == 0x00
+
+    def test_read_buffer_block_0x0c_is_demoted_diagnostic(self):
+        """The demoted 0x0C block read still frames STATUS 0x00 (matching every captured
+        0x0C TX `f7 81 04 00 0c 0b`) and tolerates a silent node (returns None)."""
+        hw, cfs, ser = _wired()
+        ser.write.reset_mock()
+        # the mock has no responder for a 0x81 node -> None
+        assert cfs.read_buffer_block_0x0c(0x81) is None
+        req = ser.write.call_args_list[0].args[0]
+        assert req[1] == 0x81
+        assert req[3] == 0x00
+        assert req[4] == 0x0C
+        assert req[5] == 0x0B
 
 
 # ===========================================================================
