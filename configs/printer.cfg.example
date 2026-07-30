@@ -2,9 +2,25 @@
 # Creality Filament System (CFS): printer.cfg configuration example
 # =============================================================================
 #
-# Protocol: CFS RS485 v1 (hardware-validated on the Creality Hi; the K1-family
-#           firmware is a CAN build with REMAPPED function codes, so K1/K1C/K2
-#           compatibility over RS485 is UNTESTED -- do not assume it)
+# Protocol: CFS RS485 v1. Hardware-validated on the Creality Hi.
+#
+#           Two different filament systems ship under the CFS name and only
+#           the first is this protocol:
+#
+#             CFS over RS485    Hi, K1, K1C, K1 SE, K1 Max     <- this repo
+#             CFS-C over CAN    K2 / X2000E line               <- not supported
+#
+#           K1 and K1C are RS485, not CAN. Creality's own CFS firmware ships
+#           config/K1_CR4CU220812S11/box.cfg with [serial_485], [auto_addr]
+#           and [box] bus:serial485 over a CH340 at 230400, and its
+#           box_wrapper carries the same class, method, g-code and error
+#           surface as the Hi. An earlier revision of this file said the
+#           K1-family was a CAN build; that applies to CFS-C, not to K1/K1C.
+#
+#           Still untested on hardware: the operational opcode NUMBERS on a
+#           K1. The addressing layer is byte-confirmed identical (see below),
+#           but the operational opcodes live in compiled constants, so run
+#           tools/capture_cfs_traffic.py on a K1 before driving anything.
 # Baud rate: 230400 (validated by captured traffic; do not change)
 # CRC: CRC-8/SMBUS (poly=0x07, init=0x00) validated against 16/16 vectors
 #
@@ -117,6 +133,49 @@ extrude_temp: 220
 # baud: 230400
 # box_count: 1
 # auto_init: True
+
+
+# ---- Creality K1 / K1C (stock RS485 CFS) -----------------------------------
+# The K1 family reaches its CFS over a CH340, so this is Option B with the
+# node Creality's own firmware uses. Note it is USB_Serial, NOT the
+# USB_Single_Serial path above: those are different adapters and the glob
+# above will not match a stock K1.
+#
+# Confirm yours first:  ls /dev/serial/by-id/
+#
+# [creality_cfs]
+# serial_port: /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
+# baud: 230400
+# box_count: 1
+# auto_init: True
+#
+# The toolhead filament switch is on the nozzle MCU on these machines:
+#
+# [filament_switch_sensor filament_sensor_2]
+# switch_pin: nozzle_mcu:PA8
+#
+# Cut, clean and extrude geometry differs from the Hi. Stock values, from
+# Creality's own box.cfg for each model:
+#
+#                        K1        K1C
+#   cut_pos_y            223.3     227.5
+#   pre_cut_pos_x/y      42.0 / 160.0
+#   clean_left_x         153.5
+#   clean_right_x        178.0
+#   extrude_pos          148 / 225.3 / 30.0
+#   cut_velocity         8000
+#
+# UNVERIFIED ON HARDWARE. The addressing layer is byte-confirmed identical to
+# the Hi, but the operational opcodes on a K1 are inferred from a matching
+# command surface, not read off the wire. Run tools/capture_cfs_traffic.py
+# against the port above and confirm before letting this drive a machine.
+
+
+# ---- If your machine is a K2 / X2000E, stop -------------------------------
+# Those use CFS-C: the same 0xF7 packet, but over SocketCAN at 1 Mbit, with
+# the cutter as its own addressable CAN node. This module speaks RS485 only
+# and will not reach a CFS-C box. Installing it there is not dangerous, it
+# simply cannot work.
 
 
 # -----------------------------------------------------------------------------

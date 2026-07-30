@@ -763,12 +763,30 @@ From `strings` analysis of `box_wrapper.cpython-39.so`:
 
 - **Creality Hi (F018), RS485:** primary reference. Transport, addressing, and every
   function code above are capture-validated on this wire.
-- **K1 / K1C / K2 Plus / K2 Max:** NOT confirmed. The K1-family firmware is a CAN
-  build that REMAPS function codes: 0x02, 0x05, 0x08 and 0x0C carry different meanings
-  there, and the connection-motor action is 0x07 instead of the Hi's 0x0F. An earlier
-  revision of this document claimed the protocol was "confirmed identical" on K1/K2;
-  that claim is withdrawn. Treat every non-Hi model as untested and never cross-use
-  the CAN binary's numbering on the RS485 wire.
+- **K1 / K1C / K1 SE / K1 Max, RS485:** same transport and same addressing as the Hi.
+  Creality's CFS firmware ships `config/K1_CR4CU220812S11/box.cfg` with `[serial_485]`,
+  `[auto_addr]` and `[box] bus: serial485` over a CH340 at 230400, and the same
+  `MultiColorMeterialBoxWrapper` class, `communication_*` methods, ~72 `BOX_*` g-codes
+  and `key831..key864` table as the Hi. The addressing layer is byte-confirmed: that
+  firmware ships `auto_addr_wrapper.py` in cleartext and every constant in the
+  Addressing section below matches it exactly.
+
+  What is **not** confirmed on a K1 is the operational opcode numbers. Those are
+  compiled constants that do not appear in strings, so they are inferred from an
+  identical command surface rather than read off the wire. Capture before driving
+  hardware. Differences from the Hi are wiring, not protocol: the serial node is
+  `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`, the toolhead switch is
+  `filament_sensor_2` on `nozzle_mcu:PA8`, and the cut/clean/extrude coordinates differ.
+
+- **K2 Plus / K2 Max (X2000E), CAN:** a different system, "CFS-C". Same `0xF7`
+  DataPackage, but marshalled into SocketCAN frames at 1 Mbit, with the cutter promoted
+  to its own addressable CAN node carrying a motor, LED and calibration (`CUT_*` g-code
+  family), and a `cfs_c_*` code path. **This repo does not support it.** Do not install
+  the RS485 module against a CFS-C box.
+
+  An earlier revision of this document described the whole K1-and-K2 family as one CAN
+  build with remapped codes. That was half right: it describes CFS-C, and it wrongly
+  swept K1/K1C in with it.
 
 ---
 

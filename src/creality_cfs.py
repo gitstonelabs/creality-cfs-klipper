@@ -401,7 +401,14 @@ CMD_BUFFER_BLOCK_0X0C: int = 0x0C          # DIAGNOSTIC ONLY: the 8-byte block r
 # The RFID/material read shares func 0x02 on this wire; the tag-LABEL byte decode out of the
 # reply is still pending a tagged-spool capture.
 CMD_GET_RFID: int = CMD_GET_FILAMENT_SENSOR_STATE
-# Still genuinely unknown -> None so no bogus frame is ever sent.
+# Confirmed to EXIST, opcode still unknown -> None so no bogus frame is ever sent.
+#
+# The shipped CFS firmware's box_wrapper exposes communication_create_connect,
+# communication_test and communication_tighten_up_enable as real BoxAction methods
+# with BOX_CREATE_CONNECT / BOX_TIGHTEN_UP_ENABLE g-codes behind them. So these are
+# not speculative commands; only their opcode bytes are missing, because they are
+# compiled constants that never appear in strings. A wire capture is what closes
+# them, not more reading.
 # CMD_CREATE_CONNECT was a guessed 0x01; the connect / get-addr-table func is 0xA3 on the wire.
 CMD_CREATE_CONNECT_TODO: int = CMD_GET_ADDR_TABLE  # = 0xA3 (addressing layer), NOT an app connect
 CMD_COMMUNICATION_TEST_TODO = None
@@ -693,6 +700,9 @@ CMD_TIMEOUTS: dict = {
 # table). key864 is the build-B addition (byte-confirmed in tina.114041.20241127; build A
 # ended at key863) -- a downstream extrude/buffer fault: the box fed filament but the
 # buffer full-limit never tripped.
+#
+# key844 and key863 were added from the shipped CFS firmware's own string table
+# rather than from a capture, so they are the vendor's wording verbatim.
 CFS_ERROR_KEYS: dict = {
     831: "serial_485 communication timeout",
     834: "params error, send data",
@@ -704,6 +714,7 @@ CFS_ERROR_KEYS: dict = {
     840: "box switch state error",
     841: "cut error: cut sensor not detected, not rebounded",
     843: "RFID error: get rfid failed",
+    844: "the pneumatic joint is abnormal and may collapse",
     845: "the nozzle is blocked",           # wire-confirmed: raised by the flush wheel watchdog
     846: "empty printing: box speed < extruder speed",
     847: "empty printing: material enwind",  # box_so.strings; pushed via the 0x0A status byte
@@ -722,6 +733,9 @@ CFS_ERROR_KEYS: dict = {
     860: "buffer error",                    # buffer hardware self-test failure at connect/init
     861: "left RFID card error",
     862: "right RFID card error",
+    # The unload failure this module already guards for: the box reported a
+    # successful retrude while the toolhead switch still sees filament.
+    863: "retrude error, retrude success but filament sensor is detected",
     864: "extrude error: buffer full limit not triggered",  # NEW in build B
 }
 
