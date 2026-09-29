@@ -374,17 +374,21 @@ class TestCmdGetBoxState:
         Captured response: b'\\xf7\\x01\\x07\\x00\\x0a\\x1c\\x14\\x00\\x00\\x48'
         data = b'\\x1c\\x14\\x00\\x00'.
 
-        v1.4.0: the [class_byte][state] decode of b0/b1 is WIRE-DISPROVEN -- b0/b1 are an
-        opaque drifting firmware base (exposed as fw_base, diagnostics only). The real load
-        flag is data[3]: 0x02 = loaded/print-locked, 0x00 = feed/change mode. The frame
-        STATUS byte is the async event channel (0x00 = idle).
+        v1.4.0: the [class_byte][state] decode of b0/b1 is WIRE-DISPROVEN. b0 is the box
+        temperature in degrees C and b1 the humidity in percent (the CFS display values;
+        the raw word stays exposed as fw_base for compatibility). The real load flag is
+        data[3]: 0x02 = loaded/print-locked, 0x00 = feed/change mode. The frame STATUS
+        byte is the async event channel (0x00 = idle).
         """
         resp = b'\xf7\x01\x07\x00\x0a\x1c\x14\x00\x00\x48'
         cfs_controller._serial.response_queue.append(resp[:3])
         cfs_controller._serial.response_queue.append(resp[3:])
 
+
         result = cfs_controller.get_box_state(0x01)
-        assert result["fw_base"] == 0x1C14     # opaque b0/b1 base, diagnostics only
+        assert result["temperature_c"] == 28   # b0 = 0x1c
+        assert result["humidity_pct"] == 20    # b1 = 0x14
+        assert result["fw_base"] == 0x1C14     # raw b0/b1 word, kept for compatibility
         assert result["substatus"] == 0x00
         assert result["feeding"] is True       # data[3] == 0x00 = feed/change mode
         assert result["loaded"] is False
