@@ -499,9 +499,14 @@ ADDR_BUFFER_NODE: int = 0x81
 # ---------------------------------------------------------------------------
 # The request is sent with an EMPTY data payload (the old param byte is not on the wire).
 # RX data = 4 bytes [b0][b1][b2][b3]:
-#   b0/b1: an OPAQUE firmware base that drifts per box/firmware (0x1a20, 0x1b26, 0x1c24 and
-#          0x1d21 all observed on identical hardware) -- it carries NO load information.
-#          Gating on it caused a proven dry-purge bug on the reference stack. NEVER gate on it.
+#   b0/b1: the box's environment sensor. b0 = temperature in whole degrees C, b1 = relative
+#          humidity in whole percent, the two numbers on the CFS display. Reported to the
+#          project in August 2026 by edgarszi (GitHub), driving a box from Python over a
+#          bare RS-485 adapter with no printer on the bus, and consistent with every value
+#          this project logged: the words filed as an "opaque drifting firmware base" (0x1a20,
+#          0x1b26, 0x1c24, 0x1d21) are 26C/32%, 27C/38%, 28C/36% and 29C/33%. They carry
+#          NO load information: gating on them caused a proven dry-purge bug on the
+#          reference stack. NEVER gate on them.
 #   b2:    substatus (0x00 = OK).
 #   b3:    the REAL load/print-mode flag: 0x02 = loaded/print-locked (1:1 with the SET_BOX_MODE
 #          [slot][00] print-mode command), 0x00 = feed/change mode.
@@ -1052,6 +1057,7 @@ class CrealityCFS:
         self._preload_inflight: dict = {}  # addr -> True while a pre-load sequence is running
         self._slots: dict = {}          # tool idx -> {"present","material","remain"} cache
         self._buffer_state = None       # last 0x05 buffer byte (0 middle/1 full/2 empty), or None
+        self._box_env = {}              # addr -> last 0x0A {temperature_c, humidity_pct}
 
         # --- Box feature state surfaced in the flat `box` get_status (box_wrapper §5a) ---
         self.auto_refill: int = 0       # BOX_ENABLE_AUTO_REFILL toggle -> box.auto_refill
@@ -1953,9 +1959,13 @@ class CrealityCFS:
         Response decode (wire-corrected 2026-06-20, CRC-verified across two boxes; the old
         [hi=0x1a class byte][lo 0x20=LOADED/0x1f=FEEDING] model is WIRE-DISPROVEN):
           RSP: f7 [addr] 07 [STATUS] 0a [b0][b1][b2][b3] [crc]
-          - b0/b1: OPAQUE firmware base (0x1a20/0x1b26/0x1c24/0x1d21 all observed on identical
-            hardware). Carries NO load information -- gating on it caused the reference
-            stack's dry-purge bug. Exposed as fw_base for diagnostics only.
+          - b0: box temperature in whole degrees C; b1: relative humidity in whole percent
+            (the two numbers on the CFS display). The 0x1a20/0x1b26/0x1c24/0x1d21 words
+            once logged as an "opaque firmware base" are 26C/32%, 27C/38%, 28C/36% and
+            29C/33%. They carry NO load information -- gating on them caused the
+            reference stack's dry-purge bug. Exposed as temperature_c / humidity_pct
+            (None during a 0x30 insert push, when the data word is a phase array); the
+            raw 16-bit word is still exposed as fw_base for backward compatibility.
           - b2: substatus (0x00 = OK).
           - b3: the REAL load flag: 0x02 = loaded/print-locked, 0x00 = feed/change mode.
           - the frame STATUS byte is the async EVENT channel: 0x00 idle, 0x30 insert push
@@ -1972,11 +1982,12 @@ class CrealityCFS:
                      wake-sized 12 s single shot here).
             retries: Optional retry override (the connect probe passes 1).
 
+
         Returns:
-            dict with keys fw_base, substatus, loaded, feeding, event, insert_event,
-            event_phase, busy, addr, raw -- or None on no response (silent-CFS tolerant;
-            v1.4.0 changed this from raising RuntimeError so a missing box can never abort
-            a caller mid-choreography).
+            dict with keys temperature_c, humidity_pct, fw_base, substatus, loaded, feeding,
+            event, insert_event, event_phase, busy, addr, raw -- or None on no response
+            (silent-CFS tolerant; v1.4.0 changed this from raising RuntimeError so a
+            missing box can never abort a caller mid-choreography).
         """
         resp = self._send_command(
             addr,
@@ -1998,8 +2009,13 @@ class CrealityCFS:
         d = data_bytes
         status = resp.get("status")
         ev_phase = d[0] if status == BOX_EVENT_INSERT else None
+        # b0/b1 are the environment sensor (temperature C / humidity %) on a steady reply;
+        # on a 0x30 insert push the data word is a per-slot phase array instead.
+        env_valid = status != BOX_EVENT_INSERT
         result = {
-            "fw_base": (d[0] << 8) | d[1],   # opaque firmware base -- diagnostics only
+            "temperature_c": d[0] if env_valid else None,
+            "humidity_pct": d[1] if env_valid else None,
+            "fw_base": (d[0] << 8) | d[1],   # raw b0/b1 word; kept for backward compatibility
             "substatus": d[2],
             "loaded": (d[3] == BOX_STATE_LOADED_B3),
             "feeding": (d[3] == BOX_STATE_FEEDING_B3),
@@ -2011,6 +2027,8 @@ class CrealityCFS:
             "addr": addr,
             "raw": data_bytes,
         }
+        if env_valid:
+            self._box_env[addr] = {"temperature_c": d[0], "humidity_pct": d[1]}
         # Fault dispatch (buffer spec 2026-07-19): the box raises its OWN feed-loop faults
         # as abnormal STATUS bytes on the 0x0A reply; route them to the status sink.
         self._note_box_status(addr, status, data_bytes)
@@ -3083,7 +3101,11 @@ class CrealityCFS:
             "buffer_code": self._buffer_state,
             "buffer": (BUFFER_STATE_NAMES.get(self._buffer_state, "unknown")
                        if self._buffer_state is not None else "unknown"),
+            # Last 0x0A environment reading per box (b0 = temperature C, b1 = humidity %),
+            # refreshed by every steady box-state poll (CFS_STATUS, connect probe, seams).
+            "environment": {"box%d" % a: dict(v) for a, v in sorted(self._box_env.items())},
         }
+
 
     # -----------------------------------------------------------------------
     # Stock-shaped flat `box` status (box_wrapper §5a). Consumed by CFSBoxStatus,
@@ -3369,8 +3391,11 @@ class CrealityCFS:
                     extra = " [insert event]"
                 elif st.get("busy"):
                     extra = " [busy/cal active]"
+                env = ""
+                if st.get("temperature_c") is not None:
+                    env = f" temp={st['temperature_c']}C rh={st['humidity_pct']}%"
                 results.append(
-                    f"Box {addr} (0x{addr:02X}): {name} raw={st['raw'].hex()}{extra}"
+                    f"Box {addr} (0x{addr:02X}): {name}{env} raw={st['raw'].hex()}{extra}"
                 )
             except Exception as exc:
                 results.append(f"Box {addr}: ERROR: {exc}")
