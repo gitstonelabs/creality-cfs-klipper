@@ -148,11 +148,11 @@ CFS_STATUS
 Expected output:
 
 ```
-Box 1 (0x01): FEEDING raw=1c240000
+Box 1 (0x01): FEEDING temp=28C rh=36% raw=1c240000
 ...
 ```
 
-The state is decoded from data byte 3 of the 0x0A reply (0x02 = LOADED/print-locked, 0x00 = FEEDING/change mode). The first two raw bytes are an opaque per-firmware base and vary between boxes; any response without an error confirms the boxes are communicating.
+The state is decoded from data byte 3 of the 0x0A reply (0x02 = LOADED/print-locked, 0x00 = FEEDING/change mode). The first two raw bytes are the box's temperature in degrees C and humidity in percent, the numbers on the CFS display, so they differ between boxes and drift over a session. Any response without an error confirms the boxes are communicating.
 
 ### Step 5: View the address table
 
