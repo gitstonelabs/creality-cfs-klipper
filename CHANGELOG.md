@@ -18,7 +18,12 @@ CAN build with remapped function codes). See the 1.4.0 entry below and
 
 ## [Unreleased]
 
+### Changed
+
+- **GET_BOX_STATE (0x0A) bytes `b0`/`b1` are the box temperature and humidity.** `b0` is whole degrees C and `b1` is whole percent relative humidity, the two numbers on the CFS display. edgarszi (GitHub), driving a box from Python over a bare RS-485 adapter with no printer on the bus, matched them to the display and reported it in August 2026. The words the 1.4.0 entry filed as an "opaque per-firmware base" (`0x1a20`, `0x1b26`, `0x1c24`, `0x1d21`) read 26 C/32 %, 27 C/38 %, 28 C/36 % and 29 C/33 %, which is why they drifted. `get_box_state()` now returns `temperature_c` and `humidity_pct` (both `None` during a `0x30` insert push, when the data word is the per-slot phase array); `fw_base` is kept as the raw 16-bit word so existing callers keep working. `CFS_STATUS` prints `temp=28C rh=36%` after the state name, and `get_status()` carries the last reading per box under `environment`. The 1.4.0 rule stands: these bytes carry no load information and nothing gates on them.
+
 ---
+
 
 ## [1.5.0] - 2026-07-28
 
