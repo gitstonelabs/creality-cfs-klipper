@@ -276,6 +276,16 @@ class TestSlotReads:
         st1 = cfs.get_status(0.0)
         assert st1["buffer"] == "middle" and st1["buffer_code"] == 0x00
 
+    def test_box_environment_surfaces_in_get_status(self):
+        """A steady 0x0A poll caches b0/b1 (box temperature C / humidity %) per box and
+        get_status() carries it under 'environment'. The mock replies [0x1C,0x24,..]."""
+        hw, cfs, _ = _wired()
+        assert cfs.get_status(0.0)["environment"] == {}
+        st = cfs.get_box_state(0x01)
+        assert st["temperature_c"] == 28 and st["humidity_pct"] == 36
+        env = cfs.get_status(0.0)["environment"]
+        assert env == {"box1": {"temperature_c": 28, "humidity_pct": 36}}
+
     def test_read_buffer_block_0x0c_is_demoted_diagnostic(self):
         """The demoted 0x0C block read still frames STATUS 0x00 (matching every captured
         0x0C TX `f7 81 04 00 0c 0b`) and tolerates a silent node (returns None)."""
