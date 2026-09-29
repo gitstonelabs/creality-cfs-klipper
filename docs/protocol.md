@@ -402,7 +402,8 @@ Reply data word `[b0][b1][b2][b3]`:
 
 | Byte | Meaning |
 |------|---------|
-| b0, b1 | OPAQUE firmware base. Drifts per box/firmware: `0x1a20`, `0x1b26`, `0x1c24` and `0x1d21` were all observed on identical hardware. Carries NO load information. Gating on it caused a proven dry-purge bug on the reference stack. Diagnostics only. |
+| b0 | Box temperature, whole degrees C (`0x1c` = 28 C). The value on the CFS display. |
+| b1 | Box relative humidity, whole percent (`0x24` = 36 %). The value on the CFS display. |
 | b2 | Substatus. `0x00` = OK. |
 | b3 | The real load flag. `0x02` = loaded/print-locked (1:1 with the SET_BOX_MODE `[slot][00]` print-mode command). `0x00` = feed/change mode. |
 
@@ -413,6 +414,12 @@ The frame STATUS byte is the box's async event channel:
 | 0x00 | Idle / steady state. |
 | 0x30 | Insert/update push. The data word becomes a 4-byte per-slot phase array; phase `0x03` in any slot byte means the insert completed. |
 | 0x16 | Busy/active (with b3 = `0x04`): calibration or retract in progress. Normal transiently; a wedge only if it never settles. |
+
+b0/b1 were filed as an "opaque firmware base" from 2026-06-20 until edgarszi (GitHub),
+bench-testing a box over a bare RS-485 adapter with no printer on the bus, matched them to
+the display in August 2026. The four words logged on identical hardware, `0x1a20`, `0x1b26`, `0x1c24`
+and `0x1d21`, are 26 C/32 %, 27 C/38 %, 28 C/36 % and 29 C/33 %. They carry no load
+information; gating on them caused a proven dry-purge bug on the reference stack.
 
 Caveat: `b3 == 0x02` means the box accepted print mode (box-side loaded/locked). It is
 not a filament-reached-the-hotend confirmation; the toolhead filament switch is that
