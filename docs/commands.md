@@ -52,9 +52,11 @@ CFS_INIT
 Queries box state via CMD_GET_BOX_STATE (0x0A). The request is sent with an
 EMPTY data payload. The reply data is 4 bytes `[b0][b1][b2][b3]`:
 
-- `b0`/`b1`: an opaque firmware base that drifts per box/firmware (0x1a20,
-  0x1b26, 0x1c24, 0x1d21 all observed on identical hardware). It carries no
-  load information. Never gate on it.
+- `b0`: box temperature in whole degrees C. `b1`: box relative humidity in
+  whole percent. These are the two numbers on the CFS display. Earlier
+  revisions of this page called them an opaque firmware base because the word
+  drifted between 0x1a20 and 0x1d21 across reads; that is 26 C/32 % to
+  29 C/33 %. They carry no load information. Never gate on them.
 - `b2`: substatus (0x00 = OK).
 - `b3`: the real load flag. 0x02 = loaded/print-locked, 0x00 = feed/change
   mode.
@@ -69,7 +71,12 @@ CFS_STATUS           # query all boxes
 CFS_STATUS BOX=1     # query box 1 only
 ```
 
-Example output: `Box 1 (0x01): LOADED raw=1c240002`
+
+Example output: `Box 1 (0x01): LOADED temp=28C rh=36% raw=1c240002`
+
+The reading is also cached per box in the printer object as
+`printer['creality_cfs'].environment` (`{"box1": {"temperature_c": 28,
+"humidity_pct": 36}}`), refreshed by every steady 0x0A poll.
 
 Parameters:
 - `BOX`: CFS controller address (1-4, optional, default: all)
