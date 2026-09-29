@@ -342,7 +342,7 @@ CFS_STATUS
 Box 1 (0x01): FEEDING raw=1a200000
 ```
 
-`LOADED` means the box is print-locked to a slot; `FEEDING` means it is in feed/change mode. A `[busy/cal active]` suffix means the box is mid-calibration or mid-retract (normal transiently); `[insert event]` means a spool was just inserted. The raw hex is the 4-byte `GET_BOX_STATE` word; see [state decode](#box-state-decode-from-cfs_status) below for what the bytes mean.
+`LOADED` means the box is print-locked to a slot; `FEEDING` means it is in feed/change mode. `temp=`/`rh=` are the box's own temperature and humidity readings, the same two numbers the CFS display shows. A `[busy/cal active]` suffix means the box is mid-calibration or mid-retract (normal transiently); `[insert event]` means a spool was just inserted. The raw hex is the 4-byte `GET_BOX_STATE` word; see [state decode](#box-state-decode-from-cfs_status) below for what the bytes mean.
 
 ### Step 5: Test load + retract
 
@@ -426,10 +426,10 @@ The `GET_BOX_STATE` (0x0A) reply is 4 data bytes `[b0][b1][b2][b3]`:
 
 | Byte | Meaning | Values |
 |---|---|---|
-| `b0` `b1` | Opaque firmware base. Drifts per box/firmware (`1a20`, `1b26`, `1c24`, `1d21` all observed on identical hardware). Carries **no** state; never gate on it. | varies |
+| `b0` | Box temperature in whole degrees C, as shown on the CFS display. | `0x1c` = 28 C |
+| `b1` | Box relative humidity in whole percent, as shown on the CFS display. | `0x24` = 36 % |
 | `b2` | Substatus | `0x00` = OK |
 | `b3` | The real load flag | `0x02` = loaded / print-locked, `0x00` = feed/change mode, `0x04` = busy (during a `0x16` event) |
-
 The frame's STATUS byte doubles as the box's async event channel and is surfaced by `CFS_STATUS`:
 
 | Event | Meaning | Action |
