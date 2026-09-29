@@ -33,6 +33,7 @@ from creality_cfs import (
     CMD_GET_BOX_STATE,
     CMD_GET_VERSION_SN,
     BOX_EVENT_IDLE,
+    BOX_EVENT_INSERT,
     PRELOAD_PHASE_ARM,
     PRELOAD_PHASE_DISARM,
     PRELOAD_PHASE_SLOT_REARM,
@@ -105,6 +106,8 @@ def _box_state(addr, d3=0x02, event=BOX_EVENT_IDLE):
     """
     raw = bytes([0x1C, 0x24, 0x00, d3])
     return {
+        "temperature_c": 0x1C,
+        "humidity_pct": 0x24,
         "fw_base": 0x1C24,
         "substatus": 0x00,
         "loaded": d3 == 0x02,
@@ -323,7 +326,28 @@ class TestCmdCFSStatus:
         cfs_controller.get_box_state.assert_called_once_with(2)
         text = gcmd.respond_info.call_args[0][0]
         assert "LOADED" in text
+        assert "temp=28C rh=36%" in text  # b0/b1 = box temperature / humidity
         assert "1c240002" in text  # raw hex echoed for diagnostics
+
+    def test_cmd_cfs_status_omits_environment_during_insert_push(self, cfs_controller):
+        """On a 0x30 insert push the data word is a phase array, not temp/humidity,
+        so CFS_STATUS must not print temp=/rh= for that reply."""
+        cfs_controller._box_table[0].mapped = True
+        st = _box_state(addr=1, d3=0x03, event=BOX_EVENT_INSERT)
+        st["temperature_c"] = None
+        st["humidity_pct"] = None
+        cfs_controller.get_box_state = mock.MagicMock(return_value=st)
+
+        gcmd = mock.MagicMock()
+        gcmd.error.side_effect = lambda msg: Exception(msg)
+        gcmd.get_int.side_effect = lambda key, default=None, **kw: {"BOX": 1}.get(key, default)
+
+        cfs_controller.cmd_CFS_STATUS(gcmd)
+
+        text = gcmd.respond_info.call_args[0][0]
+        assert "[insert event]" in text
+        assert "temp=" not in text
+        assert "rh=" not in text
 
     def test_cmd_cfs_status_all_boxes_queried_when_no_box_param(self, cfs_controller):
         """CFS_STATUS without BOX param queries all mapped boxes and names FEEDING.
