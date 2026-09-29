@@ -71,6 +71,7 @@ from creality_cfs import (
     BOX_STATE_LOADED_B3,
     BOX_STATE_FEEDING_B3,
     BOX_EVENT_BUSY,
+    BOX_EVENT_INSERT,
     PRELOAD_MASK_ALL,
     PRELOAD_PHASE_ARM,
     CUT_STATE_DONE,
@@ -322,9 +323,12 @@ def _good_frame(addr, func, data=b""):
     return build_message(addr, STATUS_ADDRESSING, func, data)
 
 
-# v1.4.0 wire-real GET_BOX_STATE payload: 4 bytes [fw_hi][fw_lo][substatus][b3].
-# b0/b1 are an OPAQUE drifting firmware base (0x1C24 is one observed value) and b3 is
-# the real load flag; the old 2-byte [0x1A][0x20] class/lo payload is wire-disproven.
+
+
+# v1.4.0 wire-real GET_BOX_STATE payload: 4 bytes [temp_c][humidity_pct][substatus][b3].
+# b0/b1 are the box temperature and humidity (0x1C24 = 28 C / 36 %, one logged value)
+# and b3 is the real load flag; the old 2-byte [0x1A][0x20] class/lo payload is
+# wire-disproven.
 BOX_STATE_PAYLOAD_LOADED = bytes([0x1C, 0x24, 0x00, BOX_STATE_LOADED_B3])
 BOX_STATE_PAYLOAD_FEEDING = bytes([0x1C, 0x24, 0x00, BOX_STATE_FEEDING_B3])
 
@@ -938,15 +942,28 @@ class TestPublicApiThroughRealTransport:
             cfs._connect_serial()
             return call()
 
+    def test_get_box_state_insert_push_has_no_environment(self):
+        # On a STATUS 0x30 insert push the 4 data bytes are a per-slot phase array, so
+        # b0/b1 must not be reported as temperature/humidity.
+        cfs = _bare_cfs()
+        frame = build_message(0x01, BOX_EVENT_INSERT, CMD_GET_BOX_STATE,
+                              bytes([0x03, 0x00, 0x00, 0x00]))
+        result = self._run(cfs, frame, lambda: cfs.get_box_state(0x01))
+        assert result["insert_event"] is True
+        assert result["temperature_c"] is None
+        assert result["humidity_pct"] is None
+
     def test_get_box_state_decodes_loaded(self):
-        # v1.4.0: the load flag is data[3]==0x02; b0/b1 are an opaque fw base (the old
-        # [hi][lo] state/state_str/class_byte decode is wire-disproven and gone).
+        # v1.4.0: the load flag is data[3]==0x02; b0/b1 are the box temperature and
+        # humidity (the old [hi][lo] state/state_str/class_byte decode is wire-disproven).
         cfs = _bare_cfs()
         frame = _good_frame(0x01, CMD_GET_BOX_STATE, BOX_STATE_PAYLOAD_LOADED)
         result = self._run(cfs, frame, lambda: cfs.get_box_state(0x01))
         assert result["loaded"] is True
         assert result["feeding"] is False
-        assert result["fw_base"] == 0x1C24     # diagnostics only, never gated on
+        assert result["temperature_c"] == 28   # b0 = 0x1c, box temperature in C
+        assert result["humidity_pct"] == 36    # b1 = 0x24, box humidity in %
+        assert result["fw_base"] == 0x1C24     # raw b0/b1 word, never gated on
         assert result["substatus"] == 0x00
         assert result["addr"] == 0x01
         assert result["raw"] == BOX_STATE_PAYLOAD_LOADED
