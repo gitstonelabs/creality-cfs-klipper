@@ -104,7 +104,7 @@ are CRC-verified from live captures on the Hi RS485 wire:
 | 0x04 | SET_BOX_MODE | `[0x00][0x01]` (fixed pair) enters feed mode; `[slot][0x00]` is the per-slot print mode. The slot never rides in the enter-feed frame (audit fix 2026-07-19) |
 | 0x05 | GET_BUFFER_STATE | Filament-buffer shuttle position on the box: 0x00 middle, 0x01 full, 0x02 empty (re-pinned 2026-07-19; the vendor .so narrates this frame as `buffer_state`). Enum bytecode-derived; only 0x00 wire-seen on the Hi. The earlier CUT_STATE label was a misattribution |
 | 0x08 | GET_HARDWARE_STATUS | `[channel]` request, 1 flag byte reply; 0x01 is the idle value |
-| 0x0A | GET_BOX_STATE | EMPTY request payload; 4-byte reply `[b0][b1][b2][b3]`: b0/b1 are an opaque drifting firmware base carrying no state, b2 is a substatus, b3 is the load flag (0x02 loaded/print-locked, 0x00 feed mode) |
+| 0x0A | GET_BOX_STATE | EMPTY request payload; 4-byte reply `[b0][b1][b2][b3]`: b0 is box temperature in degrees C and b1 is humidity in percent (the CFS display values; matched by edgarszi on a bare RS-485 bench in August 2026), b2 is a substatus, b3 is the load flag (0x02 loaded/print-locked, 0x00 feed mode) |
 | 0x0C | (diagnostic) 0x81+ block read | Demoted 2026-07-19: entangled with FOC-servo traffic (the identical frame also goes to 0x82, the Y servo); role pending a directed capture |
 | 0x0D | SET_PRE_LOADING | `[mask][phase]`: arm `[0f][00]`, disarm `[0f][01]`, connect self-check `[00][01]` then `[0f][01]` only, per-slot re-arm `[slot][02]` (blocks ~38 s); reply STATUS 0x00 ACK, 0x16 NAK |
 | 0x0E | MEASURING_WHEEL | Data `[0x01]`; reply is a 4-byte big-endian IEEE-754 float, negative, magnitude grows as filament feeds |
